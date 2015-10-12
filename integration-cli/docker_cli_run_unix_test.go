@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/docker/docker/pkg/integration/checker"
 	"github.com/docker/docker/pkg/mount"
+	"github.com/docker/docker/pkg/parsers"
+	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/go-check/check"
 	"github.com/kr/pty"
 )
@@ -53,6 +57,8 @@ func (s *DockerSuite) TestRunRedirectStdout(c *check.C) {
 
 // Test recursive bind mount works by default
 func (s *DockerSuite) TestRunWithVolumesIsRecursive(c *check.C) {
+	// /tmp gets permission denied
+	testRequires(c, NotUserNamespace)
 	tmpDir, err := ioutil.TempDir("", "docker_recursive_mount_test")
 	if err != nil {
 		c.Fatal(err)
@@ -86,7 +92,7 @@ func (s *DockerSuite) TestRunWithVolumesIsRecursive(c *check.C) {
 }
 
 func (s *DockerSuite) TestRunDeviceDirectory(c *check.C) {
-	testRequires(c, NativeExecDriver)
+	testRequires(c, NativeExecDriver, NotUserNamespace)
 	if _, err := os.Stat("/dev/snd"); err != nil {
 		c.Skip("Host does not have /dev/snd")
 	}
@@ -205,13 +211,16 @@ func (s *DockerSuite) TestRunWithCpuPeriod(c *check.C) {
 func (s *DockerSuite) TestRunWithKernelMemory(c *check.C) {
 	testRequires(c, kernelMemorySupport)
 
-	dockerCmd(c, "run", "--kernel-memory", "50M", "--name", "test", "busybox", "true")
+	dockerCmd(c, "run", "--kernel-memory", "50M", "--name", "test1", "busybox", "true")
 
-	out, err := inspectField("test", "HostConfig.KernelMemory")
+	out, err := inspectField("test1", "HostConfig.KernelMemory")
 	c.Assert(err, check.IsNil)
-	if out != "52428800" {
-		c.Fatalf("setting the kernel memory limit failed")
-	}
+	c.Assert(out, check.Equals, "52428800")
+
+	out, _, err = dockerCmdWithError("run", "--kernel-memory", "-16m", "--name", "test2", "busybox", "echo", "test")
+	expected := "invalid size"
+	c.Assert(err, check.NotNil)
+	c.Assert(out, checker.Contains, expected)
 }
 
 // "test" should be printed
@@ -227,7 +236,7 @@ func (s *DockerSuite) TestRunEchoStdoutWitCPUShares(c *check.C) {
 func (s *DockerSuite) TestRunEchoStdoutWithCPUSharesAndMemoryLimit(c *check.C) {
 	testRequires(c, cpuShare)
 	testRequires(c, memoryLimitSupport)
-	out, _ := dockerCmd(c, "run", "--cpu-shares", "1000", "-m", "16m", "busybox", "echo", "test")
+	out, _, _ := dockerCmdWithStdoutStderr(c, "run", "--cpu-shares", "1000", "-m", "16m", "busybox", "echo", "test")
 	if out != "test\n" {
 		c.Errorf("container should've printed 'test', got %q instead", out)
 	}
@@ -291,7 +300,7 @@ func (s *DockerSuite) TestRunOOMExitCode(c *check.C) {
 // "test" should be printed
 func (s *DockerSuite) TestRunEchoStdoutWithMemoryLimit(c *check.C) {
 	testRequires(c, memoryLimitSupport)
-	out, _ := dockerCmd(c, "run", "-m", "16m", "busybox", "echo", "test")
+	out, _, _ := dockerCmdWithStdoutStderr(c, "run", "-m", "16m", "busybox", "echo", "test")
 	out = strings.Trim(out, "\r\n")
 
 	if expected := "test"; out != expected {
@@ -299,7 +308,10 @@ func (s *DockerSuite) TestRunEchoStdoutWithMemoryLimit(c *check.C) {
 	}
 }
 
-// should run without memory swap
+// TestRunWithoutMemoryswapLimit sets memory limit and disables swap
+// memory limit, this means the processes in the container can use
+// 16M memory and as much swap memory as they need (if the host
+// supports swap memory).
 func (s *DockerSuite) TestRunWithoutMemoryswapLimit(c *check.C) {
 	testRequires(c, NativeExecDriver)
 	testRequires(c, memoryLimitSupport)
@@ -315,8 +327,28 @@ func (s *DockerSuite) TestRunWithSwappiness(c *check.C) {
 func (s *DockerSuite) TestRunWithSwappinessInvalid(c *check.C) {
 	testRequires(c, memorySwappinessSupport)
 	out, _, err := dockerCmdWithError("run", "--memory-swappiness", "101", "busybox", "true")
-	if err == nil {
-		c.Fatalf("failed. test was able to set invalid value, output: %q", out)
+	c.Assert(err, check.NotNil)
+	expected := "Valid memory swappiness range is 0-100"
+	c.Assert(out, checker.Contains, expected, check.Commentf("Expected output to contain %q, not %q", out, expected))
+
+	out, _, err = dockerCmdWithError("run", "--memory-swappiness", "-10", "busybox", "true")
+	c.Assert(err, check.NotNil)
+	c.Assert(out, checker.Contains, expected, check.Commentf("Expected output to contain %q, not %q", out, expected))
+}
+
+func (s *DockerSuite) TestRunWithMemoryReservation(c *check.C) {
+	testRequires(c, memoryReservationSupport)
+	dockerCmd(c, "run", "--memory-reservation", "200M", "busybox", "true")
+}
+
+func (s *DockerSuite) TestRunWithMemoryReservationInvalid(c *check.C) {
+	testRequires(c, memoryLimitSupport)
+	testRequires(c, memoryReservationSupport)
+	out, _, err := dockerCmdWithError("run", "-m", "500M", "--memory-reservation", "800M", "busybox", "true")
+	c.Assert(err, check.NotNil)
+	expected := "Minimum memory limit should be larger than memory reservation limit"
+	if !strings.Contains(strings.TrimSpace(out), expected) {
+		c.Fatalf("run container should fail with invalid memory reservation, output: %q", out)
 	}
 }
 
@@ -334,4 +366,72 @@ func (s *DockerSuite) TestStopContainerSignal(c *check.C) {
 	if !strings.Contains(out, "exit trapped") {
 		c.Fatalf("Expected `exit trapped` in the log, got %v", out)
 	}
+}
+
+func (s *DockerSuite) TestRunSwapLessThanMemoryLimit(c *check.C) {
+	testRequires(c, memoryLimitSupport)
+	testRequires(c, swapMemorySupport)
+	out, _, err := dockerCmdWithError("run", "-m", "16m", "--memory-swap", "15m", "busybox", "echo", "test")
+	expected := "Minimum memoryswap limit should be larger than memory limit"
+	c.Assert(err, check.NotNil)
+
+	if !strings.Contains(out, expected) {
+		c.Fatalf("Expected output to contain %q, not %q", out, expected)
+	}
+}
+
+func (s *DockerSuite) TestRunInvalidCpusetCpusFlagValue(c *check.C) {
+	testRequires(c, cgroupCpuset)
+
+	sysInfo := sysinfo.New(true)
+	cpus, err := parsers.ParseUintList(sysInfo.Cpus)
+	c.Assert(err, check.IsNil)
+	var invalid int
+	for i := 0; i <= len(cpus)+1; i++ {
+		if !cpus[i] {
+			invalid = i
+			break
+		}
+	}
+	out, _, err := dockerCmdWithError("run", "--cpuset-cpus", strconv.Itoa(invalid), "busybox", "true")
+	c.Assert(err, check.NotNil)
+	expected := fmt.Sprintf("Error response from daemon: Requested CPUs are not available - requested %s, available: %s.\n", strconv.Itoa(invalid), sysInfo.Cpus)
+	c.Assert(out, check.Equals, expected, check.Commentf("Expected output to contain %q, got %q", expected, out))
+}
+
+func (s *DockerSuite) TestRunInvalidCpusetMemsFlagValue(c *check.C) {
+	testRequires(c, cgroupCpuset)
+
+	sysInfo := sysinfo.New(true)
+	mems, err := parsers.ParseUintList(sysInfo.Mems)
+	c.Assert(err, check.IsNil)
+	var invalid int
+	for i := 0; i <= len(mems)+1; i++ {
+		if !mems[i] {
+			invalid = i
+			break
+		}
+	}
+	out, _, err := dockerCmdWithError("run", "--cpuset-mems", strconv.Itoa(invalid), "busybox", "true")
+	c.Assert(err, check.NotNil)
+	expected := fmt.Sprintf("Error response from daemon: Requested memory nodes are not available - requested %s, available: %s.\n", strconv.Itoa(invalid), sysInfo.Mems)
+	c.Assert(out, check.Equals, expected, check.Commentf("Expected output to contain %q, got %q", expected, out))
+}
+
+func (s *DockerSuite) TestRunInvalidCPUShares(c *check.C) {
+	testRequires(c, cpuShare)
+	out, _, err := dockerCmdWithError("run", "--cpu-shares", "1", "busybox", "echo", "test")
+	c.Assert(err, check.NotNil, check.Commentf(out))
+	expected := "The minimum allowed cpu-shares is 2"
+	c.Assert(out, checker.Contains, expected)
+
+	out, _, err = dockerCmdWithError("run", "--cpu-shares", "-1", "busybox", "echo", "test")
+	c.Assert(err, check.NotNil, check.Commentf(out))
+	expected = "shares: invalid argument"
+	c.Assert(out, checker.Contains, expected)
+
+	out, _, err = dockerCmdWithError("run", "--cpu-shares", "99999999", "busybox", "echo", "test")
+	c.Assert(err, check.NotNil, check.Commentf(out))
+	expected = "The maximum allowed cpu-shares is"
+	c.Assert(out, checker.Contains, expected)
 }

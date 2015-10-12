@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/Sirupsen/logrus"
-	derr "github.com/docker/docker/api/errors"
 	"github.com/docker/docker/daemon/execdriver"
+	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/volume"
@@ -55,7 +55,17 @@ func (container *Container) setupMounts() ([]execdriver.Mount, error) {
 	}
 
 	mounts = sortMounts(mounts)
-	return append(mounts, container.networkMounts()...), nil
+	netMounts := container.networkMounts()
+	// if we are going to mount any of the network files from container
+	// metadata, the ownership must be set properly for potential container
+	// remapped root (user namespaces)
+	rootUID, rootGID := container.daemon.GetRemappedUIDGID()
+	for _, mount := range netMounts {
+		if err := os.Chown(mount.Source, rootUID, rootGID); err != nil {
+			return nil, err
+		}
+	}
+	return append(mounts, netMounts...), nil
 }
 
 // parseBindMount validates the configuration of mount information in runconfig is valid.

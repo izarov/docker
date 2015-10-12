@@ -3,6 +3,7 @@ package opts
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -377,35 +378,23 @@ func TestValidateDevice(t *testing.T) {
 }
 
 func TestValidateEnv(t *testing.T) {
-	invalids := map[string]string{
-		"some spaces": "poorly formatted environment: variable 'some spaces' is not a valid environment variable",
-		"asd!qwe":     "poorly formatted environment: variable 'asd!qwe' is not a valid environment variable",
-		"1asd":        "poorly formatted environment: variable '1asd' is not a valid environment variable",
-		"123":         "poorly formatted environment: variable '123' is not a valid environment variable",
-	}
 	valids := map[string]string{
-		"a":                  "a",
-		"something":          "something",
-		"_=a":                "_=a",
-		"env1=value1":        "env1=value1",
-		"_env1=value1":       "_env1=value1",
-		"env2=value2=value3": "env2=value2=value3",
-		"env3=abc!qwe":       "env3=abc!qwe",
-		"env_4=value 4":      "env_4=value 4",
-		"PATH":               fmt.Sprintf("PATH=%v", os.Getenv("PATH")),
-		"PATH=something":     "PATH=something",
-	}
-	for value, expectedError := range invalids {
-		_, err := ValidateEnv(value)
-		if err == nil {
-			t.Fatalf("Expected ErrBadEnvVariable, got nothing")
-		}
-		if _, ok := err.(ErrBadEnvVariable); !ok {
-			t.Fatalf("Expected ErrBadEnvVariable, got [%s]", err)
-		}
-		if err.Error() != expectedError {
-			t.Fatalf("Expected ErrBadEnvVariable with message [%s], got [%s]", expectedError, err.Error())
-		}
+		"a":                   "a",
+		"something":           "something",
+		"_=a":                 "_=a",
+		"env1=value1":         "env1=value1",
+		"_env1=value1":        "_env1=value1",
+		"env2=value2=value3":  "env2=value2=value3",
+		"env3=abc!qwe":        "env3=abc!qwe",
+		"env_4=value 4":       "env_4=value 4",
+		"PATH":                fmt.Sprintf("PATH=%v", os.Getenv("PATH")),
+		"PATH=something":      "PATH=something",
+		"asd!qwe":             "asd!qwe",
+		"1asd":                "1asd",
+		"123":                 "123",
+		"some space":          "some space",
+		"  some space before": "  some space before",
+		"some space after  ":  "some space after  ",
 	}
 	for value, expected := range valids {
 		actual, err := ValidateEnv(value)
@@ -435,7 +424,7 @@ func TestValidateLabel(t *testing.T) {
 	}
 }
 
-func TestValidateHost(t *testing.T) {
+func TestParseHost(t *testing.T) {
 	invalid := map[string]string{
 		"anything":              "Invalid bind address format: anything",
 		"something with spaces": "Invalid bind address format: something with spaces",
@@ -445,7 +434,14 @@ func TestValidateHost(t *testing.T) {
 		"tcp://invalid":      "Invalid bind address format: invalid",
 		"tcp://invalid:port": "Invalid bind address format: invalid:port",
 	}
+	const defaultHTTPHost = "tcp://127.0.0.1:2375"
+	var defaultHOST = "unix:///var/run/docker.sock"
+
+	if runtime.GOOS == "windows" {
+		defaultHOST = defaultHTTPHost
+	}
 	valid := map[string]string{
+		"":                         defaultHOST,
 		"fd://":                    "fd://",
 		"fd://something":           "fd://something",
 		"tcp://host:":              "tcp://host:2375",
@@ -462,12 +458,12 @@ func TestValidateHost(t *testing.T) {
 	}
 
 	for value, errorMessage := range invalid {
-		if _, err := ValidateHost(value); err == nil || err.Error() != errorMessage {
+		if _, err := ParseHost(value); err == nil || err.Error() != errorMessage {
 			t.Fatalf("Expected an error for %v with [%v], got [%v]", value, errorMessage, err)
 		}
 	}
 	for value, expected := range valid {
-		if actual, err := ValidateHost(value); err != nil || actual != expected {
+		if actual, err := ParseHost(value); err != nil || actual != expected {
 			t.Fatalf("Expected for %v [%v], got [%v, %v]", value, expected, actual, err)
 		}
 	}

@@ -5,7 +5,6 @@ package daemon
 import (
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,19 +13,20 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/autogen/dockerversion"
 	"github.com/docker/docker/daemon/graphdriver"
+	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/fileutils"
+	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/docker/docker/pkg/sysinfo"
-	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/utils"
 	"github.com/docker/libnetwork"
-	nwapi "github.com/docker/libnetwork/api"
 	nwconfig "github.com/docker/libnetwork/config"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/docker/libnetwork/options"
 	"github.com/opencontainers/runc/libcontainer/label"
+	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -110,6 +110,9 @@ func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, a
 		// By default, MemorySwap is set to twice the size of Memory.
 		hostConfig.MemorySwap = hostConfig.Memory * 2
 	}
+	if hostConfig.MemoryReservation == 0 && hostConfig.Memory > 0 {
+		hostConfig.MemoryReservation = hostConfig.Memory
+	}
 }
 
 // verifyPlatformContainerSettings performs platform-specific validation of the
@@ -117,6 +120,11 @@ func (daemon *Daemon) adaptContainerSettings(hostConfig *runconfig.HostConfig, a
 func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostConfig, config *runconfig.Config) ([]string, error) {
 	warnings := []string{}
 	sysInfo := sysinfo.New(true)
+
+	warnings, err := daemon.verifyExperimentalContainerSettings(hostConfig, config)
+	if err != nil {
+		return warnings, err
+	}
 
 	if hostConfig.LxcConf.Len() > 0 && !strings.Contains(daemon.ExecutionDriver().Name(), "lxc") {
 		return warnings, fmt.Errorf("Cannot use --lxc-conf with execdriver: %s", daemon.ExecutionDriver().Name())
@@ -154,6 +162,14 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostC
 			return warnings, fmt.Errorf("Invalid value: %v, valid memory swappiness range is 0-100.", swappiness)
 		}
 	}
+	if hostConfig.MemoryReservation > 0 && !sysInfo.MemoryReservation {
+		warnings = append(warnings, "Your kernel does not support memory soft limit capabilities. Limitation discarded.")
+		logrus.Warnf("Your kernel does not support memory soft limit capabilities. Limitation discarded.")
+		hostConfig.MemoryReservation = 0
+	}
+	if hostConfig.Memory > 0 && hostConfig.MemoryReservation > 0 && hostConfig.Memory < hostConfig.MemoryReservation {
+		return warnings, fmt.Errorf("Minimum memory limit should be larger than memory reservation limit, see usage.")
+	}
 	if hostConfig.KernelMemory > 0 && !sysInfo.KernelMemory {
 		warnings = append(warnings, "Your kernel does not support kernel memory limit capabilities. Limitation discarded.")
 		logrus.Warnf("Your kernel does not support kernel memory limit capabilities. Limitation discarded.")
@@ -183,6 +199,20 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *runconfig.HostC
 		logrus.Warnf("Your kernel does not support cpuset. Cpuset discarded.")
 		hostConfig.CpusetCpus = ""
 		hostConfig.CpusetMems = ""
+	}
+	cpusAvailable, err := sysInfo.IsCpusetCpusAvailable(hostConfig.CpusetCpus)
+	if err != nil {
+		return warnings, derr.ErrorCodeInvalidCpusetCpus.WithArgs(hostConfig.CpusetCpus)
+	}
+	if !cpusAvailable {
+		return warnings, derr.ErrorCodeNotAvailableCpusetCpus.WithArgs(hostConfig.CpusetCpus, sysInfo.Cpus)
+	}
+	memsAvailable, err := sysInfo.IsCpusetMemsAvailable(hostConfig.CpusetMems)
+	if err != nil {
+		return warnings, derr.ErrorCodeInvalidCpusetMems.WithArgs(hostConfig.CpusetMems)
+	}
+	if !memsAvailable {
+		return warnings, derr.ErrorCodeNotAvailableCpusetMems.WithArgs(hostConfig.CpusetMems, sysInfo.Mems)
 	}
 	if hostConfig.BlkioWeight > 0 && !sysInfo.BlkioWeight {
 		warnings = append(warnings, "Your kernel does not support Block I/O weight. Weight discarded.")
@@ -224,10 +254,7 @@ func checkSystem() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("The Docker daemon needs to be run as root")
 	}
-	if err := checkKernel(); err != nil {
-		return err
-	}
-	return nil
+	return checkKernel()
 }
 
 // configureKernelSecuritySupport configures and validate security support for the kernel
@@ -253,16 +280,16 @@ func migrateIfDownlevel(driver graphdriver.Driver, root string) error {
 	return migrateIfAufs(driver, root)
 }
 
-func configureSysInit(config *Config) (string, error) {
+func configureSysInit(config *Config, rootUID, rootGID int) (string, error) {
 	localCopy := filepath.Join(config.Root, "init", fmt.Sprintf("dockerinit-%s", dockerversion.VERSION))
 	sysInitPath := utils.DockerInitPath(localCopy)
 	if sysInitPath == "" {
-		return "", fmt.Errorf("Could not locate dockerinit: This usually means docker was built incorrectly. See https://docs.docker.com/contributing/devenvironment for official build instructions.")
+		return "", fmt.Errorf("Could not locate dockerinit: This usually means docker was built incorrectly. See https://docs.docker.com/project/set-up-dev-env/ for official build instructions.")
 	}
 
 	if sysInitPath != localCopy {
 		// When we find a suitable dockerinit binary (even if it's our local binary), we copy it into config.Root at localCopy for future use (so that the original can go away without that being a problem, for example during a package upgrade).
-		if err := os.Mkdir(filepath.Dir(localCopy), 0700); err != nil && !os.IsExist(err) {
+		if err := idtools.MkdirAs(filepath.Dir(localCopy), 0700, rootUID, rootGID); err != nil && !os.IsExist(err) {
 			return "", err
 		}
 		if _, err := fileutils.CopyFile(sysInitPath, localCopy); err != nil {
@@ -280,7 +307,7 @@ func isBridgeNetworkDisabled(config *Config) bool {
 	return config.Bridge.Iface == disableNetworkBridge
 }
 
-func networkOptions(dconfig *Config) ([]nwconfig.Option, error) {
+func (daemon *Daemon) networkOptions(dconfig *Config) ([]nwconfig.Option, error) {
 	options := []nwconfig.Option{}
 	if dconfig == nil {
 		return options, nil
@@ -299,21 +326,30 @@ func networkOptions(dconfig *Config) ([]nwconfig.Option, error) {
 		options = append(options, nwconfig.OptionDefaultNetwork(dn))
 	}
 
-	if strings.TrimSpace(dconfig.NetworkKVStore) != "" {
-		kv := strings.Split(dconfig.NetworkKVStore, ":")
+	if strings.TrimSpace(dconfig.ClusterStore) != "" {
+		kv := strings.Split(dconfig.ClusterStore, "://")
 		if len(kv) < 2 {
-			return nil, fmt.Errorf("kv store daemon config must be of the form KV-PROVIDER:KV-URL")
+			return nil, fmt.Errorf("kv store daemon config must be of the form KV-PROVIDER://KV-URL")
 		}
 		options = append(options, nwconfig.OptionKVProvider(kv[0]))
-		options = append(options, nwconfig.OptionKVProviderURL(strings.Join(kv[1:], ":")))
+		options = append(options, nwconfig.OptionKVProviderURL(strings.Join(kv[1:], "://")))
+	}
+
+	if daemon.discoveryWatcher != nil {
+		options = append(options, nwconfig.OptionDiscoveryWatcher(daemon.discoveryWatcher))
+	}
+
+	if dconfig.ClusterAdvertise != "" {
+		options = append(options, nwconfig.OptionDiscoveryAddress(dconfig.ClusterAdvertise))
 	}
 
 	options = append(options, nwconfig.OptionLabels(dconfig.Labels))
+	options = append(options, driverOptions(dconfig)...)
 	return options, nil
 }
 
-func initNetworkController(config *Config) (libnetwork.NetworkController, error) {
-	netOptions, err := networkOptions(config)
+func (daemon *Daemon) initNetworkController(config *Config) (libnetwork.NetworkController, error) {
+	netOptions, err := daemon.networkOptions(config)
 	if err != nil {
 		return nil, err
 	}
@@ -323,24 +359,13 @@ func initNetworkController(config *Config) (libnetwork.NetworkController, error)
 		return nil, fmt.Errorf("error obtaining controller instance: %v", err)
 	}
 
-	// Initialize default driver "null"
-
-	if err := controller.ConfigureNetworkDriver("null", options.Generic{}); err != nil {
-		return nil, fmt.Errorf("Error initializing null driver: %v", err)
-	}
-
 	// Initialize default network on "null"
-	if _, err := controller.NewNetwork("null", "none"); err != nil {
+	if _, err := controller.NewNetwork("null", "none", libnetwork.NetworkOptionPersist(false)); err != nil {
 		return nil, fmt.Errorf("Error creating default \"null\" network: %v", err)
 	}
 
-	// Initialize default driver "host"
-	if err := controller.ConfigureNetworkDriver("host", options.Generic{}); err != nil {
-		return nil, fmt.Errorf("Error initializing host driver: %v", err)
-	}
-
 	// Initialize default network on "host"
-	if _, err := controller.NewNetwork("host", "host"); err != nil {
+	if _, err := controller.NewNetwork("host", "host", libnetwork.NetworkOptionPersist(false)); err != nil {
 		return nil, fmt.Errorf("Error creating default \"host\" network: %v", err)
 	}
 
@@ -354,18 +379,22 @@ func initNetworkController(config *Config) (libnetwork.NetworkController, error)
 	return controller, nil
 }
 
-func initBridgeDriver(controller libnetwork.NetworkController, config *Config) error {
-	option := options.Generic{
+func driverOptions(config *Config) []nwconfig.Option {
+	bridgeConfig := options.Generic{
 		"EnableIPForwarding":  config.Bridge.EnableIPForward,
 		"EnableIPTables":      config.Bridge.EnableIPTables,
 		"EnableUserlandProxy": config.Bridge.EnableUserlandProxy}
+	bridgeOption := options.Generic{netlabel.GenericData: bridgeConfig}
 
-	if err := controller.ConfigureNetworkDriver("bridge", options.Generic{netlabel.GenericData: option}); err != nil {
-		return fmt.Errorf("Error initializing bridge driver: %v", err)
-	}
+	dOptions := []nwconfig.Option{}
+	dOptions = append(dOptions, nwconfig.OptionDriverConfig("bridge", bridgeOption))
+	return dOptions
+}
 
+func initBridgeDriver(controller libnetwork.NetworkController, config *Config) error {
 	netOption := options.Generic{
 		"BridgeName":         config.Bridge.Iface,
+		"DefaultBridge":      true,
 		"Mtu":                config.Mtu,
 		"EnableIPMasquerade": config.Bridge.EnableIPMasq,
 		"EnableICC":          config.Bridge.InterContainerCommunication,
@@ -417,7 +446,8 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 		libnetwork.NetworkOptionGeneric(options.Generic{
 			netlabel.GenericData: netOption,
 			netlabel.EnableIPv6:  config.Bridge.EnableIPv6,
-		}))
+		}),
+		libnetwork.NetworkOptionPersist(false))
 	if err != nil {
 		return fmt.Errorf("Error creating default \"bridge\" network: %v", err)
 	}
@@ -430,7 +460,7 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *Config) e
 //
 // This extra layer is used by all containers as the top-most ro layer. It protects
 // the container from unwanted side-effects on the rw layer.
-func setupInitLayer(initLayer string) error {
+func setupInitLayer(initLayer string, rootUID, rootGID int) error {
 	for pth, typ := range map[string]string{
 		"/dev/pts":         "dir",
 		"/dev/shm":         "dir",
@@ -453,12 +483,12 @@ func setupInitLayer(initLayer string) error {
 
 		if _, err := os.Stat(filepath.Join(initLayer, pth)); err != nil {
 			if os.IsNotExist(err) {
-				if err := system.MkdirAll(filepath.Join(initLayer, filepath.Dir(pth)), 0755); err != nil {
+				if err := idtools.MkdirAllAs(filepath.Join(initLayer, filepath.Dir(pth)), 0755, rootUID, rootGID); err != nil {
 					return err
 				}
 				switch typ {
 				case "dir":
-					if err := system.MkdirAll(filepath.Join(initLayer, pth), 0755); err != nil {
+					if err := idtools.MkdirAllAs(filepath.Join(initLayer, pth), 0755, rootUID, rootGID); err != nil {
 						return err
 					}
 				case "file":
@@ -467,6 +497,7 @@ func setupInitLayer(initLayer string) error {
 						return err
 					}
 					f.Close()
+					f.Chown(rootUID, rootGID)
 				default:
 					if err := os.Symlink(typ, filepath.Join(initLayer, pth)); err != nil {
 						return err
@@ -480,12 +511,6 @@ func setupInitLayer(initLayer string) error {
 
 	// Layer is ready to use, if it wasn't before.
 	return nil
-}
-
-// NetworkAPIRouter implements a feature for server-experimental,
-// directly calling into libnetwork.
-func (daemon *Daemon) NetworkAPIRouter() func(w http.ResponseWriter, req *http.Request) {
-	return nwapi.NewHTTPHandler(daemon.netController)
 }
 
 // registerLinks writes the links to a file.
@@ -541,4 +566,23 @@ func (daemon *Daemon) newBaseContainer(id string) Container {
 		Volumes:     make(map[string]string),
 		VolumesRW:   make(map[string]bool),
 	}
+}
+
+// getDefaultRouteMtu returns the MTU for the default route's interface.
+func getDefaultRouteMtu() (int, error) {
+	routes, err := netlink.RouteList(nil, 0)
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range routes {
+		// a nil Dst means that this is the default route.
+		if r.Dst == nil {
+			i, err := net.InterfaceByIndex(r.LinkIndex)
+			if err != nil {
+				continue
+			}
+			return i.MTU, nil
+		}
+	}
+	return 0, errNoDefaultRoute
 }

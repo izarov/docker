@@ -15,8 +15,7 @@ weight = 2
 
  - The Remote API has replaced `rcli`.
  - The daemon listens on `unix:///var/run/docker.sock` but you can
-   [Bind Docker to another host/port or a Unix socket](
-   /articles/basics/#bind-docker-to-another-hostport-or-a-unix-socket).
+   [Bind Docker to another host/port or a Unix socket](../../articles/basics.md#bind-docker-to-another-hostport-or-a-unix-socket).
  - The API tends to be REST. However, for some complex commands, like `attach`
    or `pull`, the HTTP connection is hijacked to transport `stdout`,
    `stdin` and `stderr`.
@@ -914,7 +913,7 @@ Status Codes:
 
     When using the TTY setting is enabled in
     [`POST /containers/create`
-    ](/reference/api/docker_remote_api_v1.9/#create-a-container "POST /containers/create"),
+    ](#create-a-container),
     the stream is the raw data from the process PTY and client's `stdin`.
     When the TTY is disabled, then the stream is multiplexed to separate
     `stdout` and `stderr`.
@@ -1093,7 +1092,8 @@ Status Codes:
          "Id": "8dbd9e392a964056420e5d58ca5cc376ef18e2de93b5cc90e868a1bbc8318c1c",
          "Created": 1365714795,
          "Size": 131506275,
-         "VirtualSize": 131506275
+         "VirtualSize": 131506275,
+         "Labels": {}
       },
       {
          "RepoTags": [
@@ -1104,7 +1104,10 @@ Status Codes:
          "Id": "b750fe79269d2ec9a3c593ef05b4332b1d1a02a62b4accb2c21d589ff2f5f2dc",
          "Created": 1364102658,
          "Size": 24653,
-         "VirtualSize": 180116135
+         "VirtualSize": 180116135,
+         "Labels": {
+            "com.example.version": "v1"
+         }
       }
     ]
 
@@ -1130,7 +1133,8 @@ Status Codes:
           "playdate:latest"
         ],
         "Size": 0,
-        "VirtualSize": 2429728
+        "VirtualSize": 2429728,
+        "Labels": {}
       }
     ]
 
@@ -1187,7 +1191,7 @@ the path to the alternate build instructions file to use.
 
 The archive may include any number of other files,
 which are accessible in the build context (See the [*ADD build
-command*](/reference/builder/#dockerbuilder)).
+command*](../../reference/builder.md#dockerbuilder)).
 
 The build is canceled if the client drops the connection by quitting
 or being killed.
@@ -1734,7 +1738,7 @@ Create a new image from a container's changes
 **Example response**:
 
     HTTP/1.1 201 Created
-    Content-Type: application/vnd.docker.raw-stream
+    Content-Type: application/json
 
     {"Id": "596069db4bf5"}
 
@@ -1979,7 +1983,7 @@ Json Parameters:
 
 Status Codes:
 
--   **201** – no error
+-   **200** – no error
 -   **404** – no such exec instance
 
     **Stream details**:

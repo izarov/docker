@@ -23,7 +23,7 @@ const (
 
 func spawnTestRegistrySession(t *testing.T) *Session {
 	authConfig := &cliconfig.AuthConfig{}
-	endpoint, err := NewEndpoint(makeIndex("/v1/"), nil)
+	endpoint, err := NewEndpoint(makeIndex("/v1/"), nil, APIVersionUnknown)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func spawnTestRegistrySession(t *testing.T) *Session {
 
 func TestPingRegistryEndpoint(t *testing.T) {
 	testPing := func(index *IndexInfo, expectedStandalone bool, assertMessage string) {
-		ep, err := NewEndpoint(index, nil)
+		ep, err := NewEndpoint(index, nil, APIVersionUnknown)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,7 +70,7 @@ func TestPingRegistryEndpoint(t *testing.T) {
 func TestEndpoint(t *testing.T) {
 	// Simple wrapper to fail test if err != nil
 	expandEndpoint := func(index *IndexInfo) *Endpoint {
-		endpoint, err := NewEndpoint(index, nil)
+		endpoint, err := NewEndpoint(index, nil, APIVersionUnknown)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +79,7 @@ func TestEndpoint(t *testing.T) {
 
 	assertInsecureIndex := func(index *IndexInfo) {
 		index.Secure = true
-		_, err := NewEndpoint(index, nil)
+		_, err := NewEndpoint(index, nil, APIVersionUnknown)
 		assertNotEqual(t, err, nil, index.Name+": Expected error for insecure index")
 		assertEqual(t, strings.Contains(err.Error(), "insecure-registry"), true, index.Name+": Expected insecure-registry  error for insecure index")
 		index.Secure = false
@@ -87,7 +87,7 @@ func TestEndpoint(t *testing.T) {
 
 	assertSecureIndex := func(index *IndexInfo) {
 		index.Secure = true
-		_, err := NewEndpoint(index, nil)
+		_, err := NewEndpoint(index, nil, APIVersionUnknown)
 		assertNotEqual(t, err, nil, index.Name+": Expected cert error for secure index")
 		assertEqual(t, strings.Contains(err.Error(), "certificate signed by unknown authority"), true, index.Name+": Expected cert error for secure index")
 		index.Secure = false
@@ -153,7 +153,7 @@ func TestEndpoint(t *testing.T) {
 	}
 	for _, address := range badEndpoints {
 		index.Name = address
-		_, err := NewEndpoint(index, nil)
+		_, err := NewEndpoint(index, nil, APIVersionUnknown)
 		checkNotEqual(t, err, nil, "Expected error while expanding bad endpoint")
 	}
 }
@@ -767,6 +767,9 @@ func TestValidRemoteName(t *testing.T) {
 		// Allow embedded hyphens.
 		"docker-rules/docker",
 
+		// Allow multiple hyphens as well.
+		"docker---rules/docker",
+
 		//Username doc and image name docker being tested.
 		"doc/docker",
 
@@ -800,8 +803,11 @@ func TestValidRemoteName(t *testing.T) {
 
 		"_docker/_docker",
 
-		// Disallow consecutive hyphens.
-		"dock--er/docker",
+		// Disallow consecutive underscores and periods.
+		"dock__er/docker",
+		"dock..er/docker",
+		"dock_.er/docker",
+		"dock-.er/docker",
 
 		// No repository.
 		"docker/",

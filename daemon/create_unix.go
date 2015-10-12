@@ -5,9 +5,8 @@ package daemon
 import (
 	"os"
 	"path/filepath"
-	"strings"
 
-	derr "github.com/docker/docker/api/errors"
+	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/runconfig"
@@ -18,17 +17,9 @@ import (
 // createContainerPlatformSpecificSettings performs platform specific container create functionality
 func createContainerPlatformSpecificSettings(container *Container, config *runconfig.Config, hostConfig *runconfig.HostConfig, img *image.Image) error {
 	for spec := range config.Volumes {
-		var (
-			name, destination string
-			parts             = strings.Split(spec, ":")
-		)
-		switch len(parts) {
-		case 2:
-			name, destination = parts[0], filepath.Clean(parts[1])
-		default:
-			name = stringid.GenerateNonCryptoID()
-			destination = filepath.Clean(parts[0])
-		}
+		name := stringid.GenerateNonCryptoID()
+		destination := filepath.Clean(spec)
+
 		// Skip volumes for which we already have something mounted on that
 		// destination because of a --volume-from.
 		if container.isDestinationMounted(destination) {

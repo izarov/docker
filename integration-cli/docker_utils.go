@@ -41,6 +41,7 @@ type Daemon struct {
 	c              *check.C
 	logFile        *os.File
 	folder         string
+	root           string
 	stdin          io.WriteCloser
 	stdout, stderr io.ReadCloser
 	cmd            *exec.Cmd
@@ -65,9 +66,10 @@ func NewDaemon(c *check.C) *Daemon {
 	if err != nil {
 		c.Fatalf("Could not make %q an absolute path: %v", dir, err)
 	}
+	daemonRoot := filepath.Join(daemonFolder, "root")
 
-	if err := os.MkdirAll(filepath.Join(daemonFolder, "graph"), 0600); err != nil {
-		c.Fatalf("Could not create %s/graph directory", daemonFolder)
+	if err := os.MkdirAll(daemonRoot, 0755); err != nil {
+		c.Fatalf("Could not create daemon root %q: %v", dir, err)
 	}
 
 	userlandProxy := true
@@ -82,6 +84,7 @@ func NewDaemon(c *check.C) *Daemon {
 		id:            id,
 		c:             c,
 		folder:        daemonFolder,
+		root:          daemonRoot,
 		storageDriver: os.Getenv("DOCKER_GRAPHDRIVER"),
 		execDriver:    os.Getenv("DOCKER_EXECDRIVER"),
 		userlandProxy: userlandProxy,
@@ -99,10 +102,14 @@ func (d *Daemon) Start(arg ...string) error {
 	args := append(d.GlobalFlags,
 		d.Command,
 		"--host", d.sock(),
-		"--graph", fmt.Sprintf("%s/graph", d.folder),
+		"--graph", d.root,
 		"--pidfile", fmt.Sprintf("%s/docker.pid", d.folder),
 		fmt.Sprintf("--userland-proxy=%t", d.userlandProxy),
 	)
+
+	if root := os.Getenv("DOCKER_REMAP_ROOT"); root != "" {
+		args = append(args, []string{"--userns-remap", root}...)
+	}
 
 	// If we don't explicitly set the log-level or debug flag(-D) then
 	// turn on debug mode
@@ -181,8 +188,11 @@ func (d *Daemon) Start(arg ...string) error {
 			if resp.StatusCode != http.StatusOK {
 				d.c.Logf("[%s] received status != 200 OK: %s", d.id, resp.Status)
 			}
-
 			d.c.Logf("[%s] daemon started", d.id)
+			d.root, err = d.queryRootDir()
+			if err != nil {
+				return fmt.Errorf("[%s] error querying daemon for root directory: %v", d.id, err)
+			}
 			return nil
 		}
 	}
@@ -276,6 +286,47 @@ out2:
 func (d *Daemon) Restart(arg ...string) error {
 	d.Stop()
 	return d.Start(arg...)
+}
+
+func (d *Daemon) queryRootDir() (string, error) {
+	// update daemon root by asking /info endpoint (to support user
+	// namespaced daemon with root remapped uid.gid directory)
+	conn, err := net.Dial("unix", filepath.Join(d.folder, "docker.sock"))
+	if err != nil {
+		return "", err
+	}
+	client := httputil.NewClientConn(conn, nil)
+
+	req, err := http.NewRequest("GET", "/info", nil)
+	if err != nil {
+		client.Close()
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		client.Close()
+		return "", err
+	}
+	body := ioutils.NewReadCloserWrapper(resp.Body, func() error {
+		defer client.Close()
+		return resp.Body.Close()
+	})
+
+	type Info struct {
+		DockerRootDir string
+	}
+	var b []byte
+	var i Info
+	b, err = readBody(body)
+	if err == nil && resp.StatusCode == 200 {
+		// read the docker root dir
+		if err = json.Unmarshal(b, &i); err == nil {
+			return i.DockerRootDir, nil
+		}
+	}
+	return "", err
 }
 
 func (d *Daemon) sock() string {
@@ -609,16 +660,16 @@ func imageExists(image string) error {
 	return err
 }
 
-func pullImageIfNotExist(image string) (err error) {
+func pullImageIfNotExist(image string) error {
 	if err := imageExists(image); err != nil {
 		pullCmd := exec.Command(dockerBinary, "pull", image)
 		_, exitCode, err := runCommandWithOutput(pullCmd)
 
 		if err != nil || exitCode != 0 {
-			err = fmt.Errorf("image %q wasn't found locally and it couldn't be pulled: %s", image, err)
+			return fmt.Errorf("image %q wasn't found locally and it couldn't be pulled: %s", image, err)
 		}
 	}
-	return
+	return nil
 }
 
 func dockerCmdWithError(args ...string) (string, int, error) {
@@ -1236,7 +1287,7 @@ func readFile(src string, c *check.C) (content string) {
 }
 
 func containerStorageFile(containerID, basename string) string {
-	return filepath.Join("/var/lib/docker/containers", containerID, basename)
+	return filepath.Join(containerStoragePath, containerID, basename)
 }
 
 // docker commands that use this function must be run with the '-d' switch.
@@ -1402,14 +1453,20 @@ func waitForContainer(contID string, args ...string) error {
 
 // waitRun will wait for the specified container to be running, maximum 5 seconds.
 func waitRun(contID string) error {
-	return waitInspect(contID, "{{.State.Running}}", "true", 5)
+	return waitInspect(contID, "{{.State.Running}}", "true", 5*time.Second)
+}
+
+// waitExited will wait for the specified container to state exit, subject
+// to a maximum time limit in seconds supplied by the caller
+func waitExited(contID string, duration time.Duration) error {
+	return waitInspect(contID, "{{.State.Status}}", "exited", duration)
 }
 
 // waitInspect will wait for the specified container to have the specified string
 // in the inspect output. It will wait until the specified timeout (in seconds)
 // is reached.
-func waitInspect(name, expr, expected string, timeout int) error {
-	after := time.After(time.Duration(timeout) * time.Second)
+func waitInspect(name, expr, expected string, timeout time.Duration) error {
+	after := time.After(timeout)
 
 	for {
 		cmd := exec.Command(dockerBinary, "inspect", "-f", expr, name)

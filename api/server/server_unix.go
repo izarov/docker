@@ -8,16 +8,16 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/docker/docker/daemon"
+	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/sockets"
 	"github.com/docker/libnetwork/portallocator"
 
 	systemdActivation "github.com/coreos/go-systemd/activation"
-	systemdDaemon "github.com/coreos/go-systemd/daemon"
 )
 
-// newServer sets up the required serverClosers and does protocol specific checking.
-func (s *Server) newServer(proto, addr string) ([]serverCloser, error) {
+// newServer sets up the required HTTPServers and does protocol specific checking.
+// newServer does not set any muxers, you should set it later to Handler field
+func (s *Server) newServer(proto, addr string) ([]*HTTPServer, error) {
 	var (
 		err error
 		ls  []net.Listener
@@ -28,10 +28,6 @@ func (s *Server) newServer(proto, addr string) ([]serverCloser, error) {
 		if err != nil {
 			return nil, err
 		}
-		// We don't want to start serving on these sockets until the
-		// daemon is initialized and installed. Otherwise required handlers
-		// won't be ready.
-		<-s.start
 	case "tcp":
 		l, err := s.initTCPSocket(addr)
 		if err != nil {
@@ -47,33 +43,16 @@ func (s *Server) newServer(proto, addr string) ([]serverCloser, error) {
 	default:
 		return nil, fmt.Errorf("Invalid protocol format: %q", proto)
 	}
-	var res []serverCloser
+	var res []*HTTPServer
 	for _, l := range ls {
 		res = append(res, &HTTPServer{
 			&http.Server{
-				Addr:    addr,
-				Handler: s.router,
+				Addr: addr,
 			},
 			l,
 		})
 	}
 	return res, nil
-}
-
-// AcceptConnections allows clients to connect to the API server.
-// Referenced Daemon is notified about this server, and waits for the
-// daemon acknowledgement before the incoming connections are accepted.
-func (s *Server) AcceptConnections(d *daemon.Daemon) {
-	// Tell the init daemon we are accepting requests
-	s.daemon = d
-	s.registerSubRouter()
-	go systemdDaemon.SdNotify("READY=1")
-	// close the lock so the listeners start accepting connections
-	select {
-	case <-s.start:
-	default:
-		close(s.start)
-	}
 }
 
 func allocateDaemonPort(addr string) error {
@@ -112,24 +91,33 @@ func listenFD(addr string) ([]net.Listener, error) {
 		return nil, err
 	}
 
-	if listeners == nil || len(listeners) == 0 {
+	if len(listeners) == 0 {
 		return nil, fmt.Errorf("No sockets found")
 	}
 
 	// default to all fds just like unix:// and tcp://
-	if addr == "" {
-		addr = "*"
-	}
-
-	fdNum, _ := strconv.Atoi(addr)
-	fdOffset := fdNum - 3
-	if (addr != "*") && (len(listeners) < int(fdOffset)+1) {
-		return nil, fmt.Errorf("Too few socket activated files passed in")
-	}
-
-	if addr == "*" {
+	if addr == "" || addr == "*" {
 		return listeners, nil
 	}
 
+	fdNum, err := strconv.Atoi(addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse systemd address, should be number: %v", err)
+	}
+	fdOffset := fdNum - 3
+	if len(listeners) < int(fdOffset)+1 {
+		return nil, fmt.Errorf("Too few socket activated files passed in")
+	}
+	if listeners[fdOffset] == nil {
+		return nil, fmt.Errorf("failed to listen on systemd activated file at fd %d", fdOffset+3)
+	}
+	for i, ls := range listeners {
+		if i == fdOffset || ls == nil {
+			continue
+		}
+		if err := ls.Close(); err != nil {
+			logrus.Errorf("Failed to close systemd activated file at fd %d: %v", fdOffset+3, err)
+		}
+	}
 	return []net.Listener{listeners[fdOffset]}, nil
 }

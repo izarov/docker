@@ -18,7 +18,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/docker/docker/builder/command"
+	"github.com/docker/docker/builder/dockerfile/command"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/stringutils"
 	"github.com/go-check/check"
@@ -2183,6 +2183,8 @@ func (s *DockerSuite) TestBuildWorkdirWithEnvVariables(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildRelativeCopy(c *check.C) {
+	// cat /test1/test2/foo gets permission denied for the user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildrelativecopy"
 	dockerfile := `
@@ -2248,7 +2250,7 @@ func (s *DockerSuite) TestBuildContextCleanup(c *check.C) {
 	testRequires(c, SameHostDaemon)
 
 	name := "testbuildcontextcleanup"
-	entries, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	entries, err := ioutil.ReadDir(filepath.Join(dockerBasePath, "tmp"))
 	if err != nil {
 		c.Fatalf("failed to list contents of tmp dir: %s", err)
 	}
@@ -2259,7 +2261,7 @@ func (s *DockerSuite) TestBuildContextCleanup(c *check.C) {
 	if err != nil {
 		c.Fatal(err)
 	}
-	entriesFinal, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	entriesFinal, err := ioutil.ReadDir(filepath.Join(dockerBasePath, "tmp"))
 	if err != nil {
 		c.Fatalf("failed to list contents of tmp dir: %s", err)
 	}
@@ -2274,7 +2276,7 @@ func (s *DockerSuite) TestBuildContextCleanupFailedBuild(c *check.C) {
 	testRequires(c, SameHostDaemon)
 
 	name := "testbuildcontextcleanup"
-	entries, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	entries, err := ioutil.ReadDir(filepath.Join(dockerBasePath, "tmp"))
 	if err != nil {
 		c.Fatalf("failed to list contents of tmp dir: %s", err)
 	}
@@ -2285,7 +2287,7 @@ func (s *DockerSuite) TestBuildContextCleanupFailedBuild(c *check.C) {
 	if err == nil {
 		c.Fatalf("expected build to fail, but it didn't")
 	}
-	entriesFinal, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	entriesFinal, err := ioutil.ReadDir(filepath.Join(dockerBasePath, "tmp"))
 	if err != nil {
 		c.Fatalf("failed to list contents of tmp dir: %s", err)
 	}
@@ -2683,6 +2685,8 @@ func (s *DockerSuite) TestBuildConditionalCache(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildAddLocalFileWithCache(c *check.C) {
+	// local files are not owned by the correct user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildaddlocalfilewithcache"
 	name2 := "testbuildaddlocalfilewithcache2"
@@ -2741,6 +2745,8 @@ func (s *DockerSuite) TestBuildAddMultipleLocalFileWithCache(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildAddLocalFileWithoutCache(c *check.C) {
+	// local files are not owned by the correct user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildaddlocalfilewithoutcache"
 	name2 := "testbuildaddlocalfilewithoutcache2"
@@ -3862,6 +3868,8 @@ RUN [ "$(id -u):$(id -g)/$(id -un):$(id -gn)/$(id -G):$(id -Gn)" = '1042:1043/10
 }
 
 func (s *DockerSuite) TestBuildEnvUsage(c *check.C) {
+	// /docker/world/hello is not owned by the correct user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildenvusage"
 	dockerfile := `FROM busybox
@@ -3898,6 +3906,8 @@ RUN    [ "$ghi" = "def" ]
 }
 
 func (s *DockerSuite) TestBuildEnvUsage2(c *check.C) {
+	// /docker/world/hello is not owned by the correct user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildenvusage2"
 	dockerfile := `FROM busybox
@@ -4024,6 +4034,8 @@ RUN [ "$(cat /testfile)" = 'test!' ]`
 }
 
 func (s *DockerSuite) TestBuildAddTar(c *check.C) {
+	// /test/foo is not owned by the correct user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildaddtar"
 
@@ -4044,6 +4056,7 @@ RUN cat /existing-directory/test/foo | grep Hi
 ADD test.tar /existing-directory-trailing-slash/
 RUN cat /existing-directory-trailing-slash/test/foo | grep Hi`
 		tmpDir, err := ioutil.TempDir("", "fake-context")
+		c.Assert(err, check.IsNil)
 		testTar, err := os.Create(filepath.Join(tmpDir, "test.tar"))
 		if err != nil {
 			c.Fatalf("failed to create test.tar archive: %v", err)
@@ -4079,7 +4092,8 @@ RUN cat /existing-directory-trailing-slash/test/foo | grep Hi`
 }
 
 func (s *DockerSuite) TestBuildAddTarXz(c *check.C) {
-	testRequires(c, DaemonIsLinux)
+	// /test/foo is not owned by the correct user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildaddtarxz"
 
@@ -4089,6 +4103,7 @@ func (s *DockerSuite) TestBuildAddTarXz(c *check.C) {
 			ADD test.tar.xz /
 			RUN cat /test/foo | grep Hi`
 		tmpDir, err := ioutil.TempDir("", "fake-context")
+		c.Assert(err, check.IsNil)
 		testTar, err := os.Create(filepath.Join(tmpDir, "test.tar"))
 		if err != nil {
 			c.Fatalf("failed to create test.tar archive: %v", err)
@@ -4141,6 +4156,7 @@ func (s *DockerSuite) TestBuildAddTarXzGz(c *check.C) {
 			ADD test.tar.xz.gz /
 			RUN ls /test.tar.xz.gz`
 		tmpDir, err := ioutil.TempDir("", "fake-context")
+		c.Assert(err, check.IsNil)
 		testTar, err := os.Create(filepath.Join(tmpDir, "test.tar"))
 		if err != nil {
 			c.Fatalf("failed to create test.tar archive: %v", err)
@@ -4787,9 +4803,7 @@ func (s *DockerSuite) TestBuildSymlinkBreakout(c *check.C) {
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildsymlinkbreakout"
 	tmpdir, err := ioutil.TempDir("", name)
-	if err != nil {
-		c.Fatal(err)
-	}
+	c.Assert(err, check.IsNil)
 	defer os.RemoveAll(tmpdir)
 	ctx := filepath.Join(tmpdir, "context")
 	if err := os.MkdirAll(ctx, 0755); err != nil {
@@ -4838,6 +4852,8 @@ func (s *DockerSuite) TestBuildSymlinkBreakout(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildXZHost(c *check.C) {
+	// /usr/local/sbin/xz gets permission denied for the user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	name := "testbuildxzhost"
 
@@ -4866,6 +4882,8 @@ RUN [ ! -e /injected ]`,
 }
 
 func (s *DockerSuite) TestBuildVolumesRetainContents(c *check.C) {
+	// /foo/file gets permission denied for the user
+	testRequires(c, NotUserNamespace)
 	testRequires(c, DaemonIsLinux)
 	var (
 		name     = "testbuildvolumescontent"
@@ -5143,9 +5161,7 @@ func (s *DockerSuite) TestBuildDockerfileOutsideContext(c *check.C) {
 
 	name := "testbuilddockerfileoutsidecontext"
 	tmpdir, err := ioutil.TempDir("", name)
-	if err != nil {
-		c.Fatal(err)
-	}
+	c.Assert(err, check.IsNil)
 	defer os.RemoveAll(tmpdir)
 	ctx := filepath.Join(tmpdir, "context")
 	if err := os.MkdirAll(ctx, 0755); err != nil {
@@ -5601,9 +5617,7 @@ func (s *DockerTrustSuite) TestTrustedBuildUntrustedTag(c *check.C) {
 func (s *DockerTrustSuite) TestBuildContextDirIsSymlink(c *check.C) {
 	testRequires(c, DaemonIsLinux)
 	tempDir, err := ioutil.TempDir("", "test-build-dir-is-symlink-")
-	if err != nil {
-		c.Fatal(err)
-	}
+	c.Assert(err, check.IsNil)
 	defer os.RemoveAll(tempDir)
 
 	// Make a real context directory in this temp directory with a simple
@@ -5644,7 +5658,7 @@ func (s *DockerSuite) TestBuildNullStringInAddCopyVolume(c *check.C) {
 
 	ctx, err := fakeContext(`
 		FROM busybox
-		
+
 		ADD null /
 		COPY nullfile /
 		VOLUME nullvolume
@@ -5678,6 +5692,7 @@ func (s *DockerSuite) TestBuildStopSignal(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArg(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -5703,6 +5718,7 @@ func (s *DockerSuite) TestBuildBuildTimeArg(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgHistory(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -5728,6 +5744,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgHistory(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgCacheHit(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -5754,6 +5771,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgCacheHit(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgCacheMissExtraArg(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -5785,6 +5803,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgCacheMissExtraArg(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgCacheMissSameArgDiffVal(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -5816,6 +5835,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgCacheMissSameArgDiffVal(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgOverrideArgDefinedBeforeEnv(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -5844,6 +5864,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgOverrideArgDefinedBeforeEnv(c *check.
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgOverrideEnvDefinedBeforeArg(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -5872,6 +5893,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgOverrideEnvDefinedBeforeArg(c *check.
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgExpansion(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldvarstest"
 
 	wdVar := "WDIR"
@@ -5981,6 +6003,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgExpansion(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgExpansionOverride(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldvarstest"
 	envKey := "foo"
 	envVal := "bar"
@@ -6010,6 +6033,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgExpansionOverride(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgUntrustedDefinedAfterUse(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -6035,6 +6059,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgUntrustedDefinedAfterUse(c *check.C) 
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgBuiltinArg(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "HTTP_PROXY"
 	envVal := "bar"
@@ -6059,6 +6084,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgBuiltinArg(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgDefaultOverride(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -6086,6 +6112,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgDefaultOverride(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgMultiArgsSameLine(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envKey1 := "foo1"
@@ -6102,6 +6129,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgMultiArgsSameLine(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgUnconsumedArg(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envVal := "bar"
@@ -6122,6 +6150,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgUnconsumedArg(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgQuotedValVariants(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envKey1 := "foo1"
@@ -6147,6 +6176,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgQuotedValVariants(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgEmptyValVariants(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	envKey1 := "foo1"
@@ -6166,6 +6196,7 @@ func (s *DockerSuite) TestBuildBuildTimeArgEmptyValVariants(c *check.C) {
 }
 
 func (s *DockerSuite) TestBuildBuildTimeArgDefintionWithNoEnvInjection(c *check.C) {
+	testRequires(c, DaemonIsLinux)
 	imgName := "bldargtest"
 	envKey := "foo"
 	args := []string{}
@@ -6179,4 +6210,16 @@ func (s *DockerSuite) TestBuildBuildTimeArgDefintionWithNoEnvInjection(c *check.
 		}
 		c.Fatalf("unexpected number of occurrences of the arg in output: %q expected: 1", out)
 	}
+}
+
+func (s *DockerSuite) TestBuildNoNamedVolume(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+	dockerCmd(c, "run", "-v", "testname:/foo", "busybox", "sh", "-c", "touch /foo/oops")
+
+	dockerFile := `FROM busybox
+	VOLUME testname:/foo
+	RUN ls /foo/oops
+	`
+	_, err := buildImage("test", dockerFile, false)
+	c.Assert(err, check.NotNil, check.Commentf("image build should have failed"))
 }

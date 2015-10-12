@@ -127,6 +127,7 @@ type Container struct {
 	ID         string `json:"Id"`
 	Names      []string
 	Image      string
+	ImageID    string
 	Command    string
 	Created    int64
 	Ports      []Port
@@ -215,6 +216,8 @@ type Info struct {
 	Name               string
 	Labels             []string
 	ExperimentalBuild  bool
+	ServerVersion      string
+	ClusterStore       string
 }
 
 // ExecStartCheck is a temp struct used by execStart
@@ -275,41 +278,6 @@ type ContainerJSON struct {
 	Config *runconfig.Config
 }
 
-// ContainerJSON120 is a backcompatibility struct along with ContainerConfig120.
-type ContainerJSON120 struct {
-	*ContainerJSONBase
-	Mounts []MountPoint
-	Config *ContainerConfig120
-}
-
-// ContainerJSONPre120 is a backcompatibility struct along with ContainerConfigPre120.
-// Note this is not used by the Windows daemon.
-type ContainerJSONPre120 struct {
-	*ContainerJSONBase
-	Volumes   map[string]string
-	VolumesRW map[string]bool
-	Config    *ContainerConfigPre120
-}
-
-// ContainerConfigPre120 is a backcompatibility struct used in ContainerJSONPre120
-type ContainerConfigPre120 struct {
-	*runconfig.Config
-
-	// backward compatibility, they now live in HostConfig
-	VolumeDriver string
-	Memory       int64
-	MemorySwap   int64
-	CPUShares    int64  `json:"CpuShares"`
-	CPUSet       string `json:"CpuSet"`
-}
-
-// ContainerConfig120 is a backcompatibility struct used in ContainerJSON120
-type ContainerConfig120 struct {
-	*runconfig.Config
-	// backward compatibility, it lives now in HostConfig
-	VolumeDriver string
-}
-
 // MountPoint represents a mount point configuration inside the container.
 type MountPoint struct {
 	Name        string `json:",omitempty"`
@@ -339,4 +307,45 @@ type VolumeCreateRequest struct {
 	Name       string            // Name is the requested name of the volume
 	Driver     string            // Driver is the name of the driver that should be used to create the volume
 	DriverOpts map[string]string // DriverOpts holds the driver specific options to use for when creating the volume.
+}
+
+// NetworkResource is the body of the "get network" http response message
+type NetworkResource struct {
+	Name       string                      `json:"name"`
+	ID         string                      `json:"id"`
+	Driver     string                      `json:"driver"`
+	Containers map[string]EndpointResource `json:"containers"`
+	Options    map[string]interface{}      `json:"options,omitempty"`
+}
+
+//EndpointResource contains network resources allocated and usd for a container in a network
+type EndpointResource struct {
+	EndpointID  string `json:"endpoint"`
+	MacAddress  string `json:"mac_address"`
+	IPv4Address string `json:"ipv4_address"`
+	IPv6Address string `json:"ipv6_address"`
+}
+
+// NetworkCreate is the expected body of the "create network" http request message
+type NetworkCreate struct {
+	Name           string                 `json:"name"`
+	CheckDuplicate bool                   `json:"check_duplicate"`
+	Driver         string                 `json:"driver"`
+	Options        map[string]interface{} `json:"options"`
+}
+
+// NetworkCreateResponse is the response message sent by the server for network create call
+type NetworkCreateResponse struct {
+	ID      string `json:"id"`
+	Warning string `json:"warning"`
+}
+
+// NetworkConnect represents the data to be used to connect a container to the network
+type NetworkConnect struct {
+	Container string `json:"container"`
+}
+
+// NetworkDisconnect represents the data to be used to disconnect a container from the network
+type NetworkDisconnect struct {
+	Container string `json:"container"`
 }

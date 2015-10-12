@@ -56,12 +56,6 @@ func handleGlobalDaemonFlag() {
 	}
 
 	if *flDaemon {
-		if *flHelp {
-			// We do not show the help output here, instead, we tell the user about the new daemon command,
-			// because the help output is so long they would not see the warning anyway.
-			fmt.Fprintln(os.Stderr, "Please use 'docker daemon --help' instead.")
-			os.Exit(0)
-		}
 		daemonCli.(*DaemonCli).CmdDaemon(flag.Args()...)
 		os.Exit(0)
 	}
@@ -77,6 +71,7 @@ func NewDaemonCli() *DaemonCli {
 	// TODO(tiborvass): remove InstallFlags?
 	daemonConfig := new(daemon.Config)
 	daemonConfig.LogConfig.Config = make(map[string]string)
+	daemonConfig.ClusterOpts = make(map[string]string)
 	daemonConfig.InstallFlags(daemonFlags, presentInHelp)
 	daemonConfig.InstallFlags(flag.CommandLine, absentFromHelp)
 	registryOptions := new(registry.Options)
@@ -175,9 +170,6 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 	daemonFlags.ParseFlags(args, true)
 	commonFlags.PostParse()
 
-	if len(commonFlags.Hosts) == 0 {
-		commonFlags.Hosts = []string{opts.DefaultHost}
-	}
 	if commonFlags.TrustKey == "" {
 		commonFlags.TrustKey = filepath.Join(getDaemonConfDir(), defaultTrustKeyFile)
 	}
@@ -230,14 +222,32 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		serverConfig.TLSConfig = tlsConfig
 	}
 
-	api := apiserver.New(serverConfig)
+	for i := 0; i < len(commonFlags.Hosts); i++ {
+		var err error
+		if commonFlags.Hosts[i], err = opts.ParseHost(commonFlags.Hosts[i]); err != nil {
+			logrus.Fatalf("error parsing -H %s : %v", commonFlags.Hosts[i], err)
+		}
+	}
+	for _, protoAddr := range commonFlags.Hosts {
+		protoAddrParts := strings.SplitN(protoAddr, "://", 2)
+		if len(protoAddrParts) != 2 {
+			logrus.Fatalf("bad format %s, expected PROTO://ADDR", protoAddr)
+		}
+		serverConfig.Addrs = append(serverConfig.Addrs, apiserver.Addr{Proto: protoAddrParts[0], Addr: protoAddrParts[1]})
+	}
+	api, err := apiserver.New(serverConfig)
+	if err != nil {
+		logrus.Fatal(err)
+	}
 
 	// The serve API routine never exits unless an error occurs
 	// We need to start it as a goroutine and wait on it so
 	// daemon doesn't exit
+	// All servers must be protected with some mechanism (systemd socket, listenbuffer)
+	// which prevents real handling of request until routes will be set.
 	serveAPIWait := make(chan error)
 	go func() {
-		if err := api.ServeAPI(commonFlags.Hosts); err != nil {
+		if err := api.ServeAPI(); err != nil {
 			logrus.Errorf("ServeAPI error: %v", err)
 			serveAPIWait <- err
 			return
@@ -270,6 +280,8 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 		"graphdriver": d.GraphDriver().String(),
 	}).Info("Docker daemon")
 
+	api.InitRouters(d)
+
 	signal.Trap(func() {
 		api.Close()
 		<-serveAPIWait
@@ -283,7 +295,8 @@ func (cli *DaemonCli) CmdDaemon(args ...string) error {
 
 	// after the daemon is done setting up we can tell the api to start
 	// accepting connections with specified daemon
-	api.AcceptConnections(d)
+	notifySystem()
+	api.AcceptConnections()
 
 	// Daemon is fully initialized and handling API traffic
 	// Wait for serve API to complete

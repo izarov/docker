@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/daemon/execdriver/native/template"
+	"github.com/docker/docker/pkg/mount"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/cgroups/fs"
 	"github.com/opencontainers/runc/libcontainer/configs"
@@ -37,7 +38,7 @@ func InitContainer(c *Command) *configs.Config {
 	container.Devices = c.AutoCreatedDevices
 	container.Rootfs = c.Rootfs
 	container.Readonlyfs = c.ReadonlyRootfs
-	container.Privatefs = true
+	container.RootPropagation = mount.RPRIVATE
 
 	// check to see if we are running in ramdisk to disable pivot root
 	container.NoPivotRoot = os.Getenv("DOCKER_RAMDISK") != ""
@@ -64,7 +65,7 @@ func SetupCgroups(container *configs.Config, c *Command) error {
 	if c.Resources != nil {
 		container.Cgroups.CpuShares = c.Resources.CPUShares
 		container.Cgroups.Memory = c.Resources.Memory
-		container.Cgroups.MemoryReservation = c.Resources.Memory
+		container.Cgroups.MemoryReservation = c.Resources.MemoryReservation
 		container.Cgroups.MemorySwap = c.Resources.MemorySwap
 		container.Cgroups.CpusetCpus = c.Resources.CpusetCpus
 		container.Cgroups.CpusetMems = c.Resources.CpusetMems

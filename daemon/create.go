@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	"github.com/Sirupsen/logrus"
-	derr "github.com/docker/docker/api/errors"
 	"github.com/docker/docker/api/types"
+	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/graph/tags"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/pkg/parsers"
@@ -15,43 +15,40 @@ import (
 )
 
 // ContainerCreate takes configs and creates a container.
-func (daemon *Daemon) ContainerCreate(name string, config *runconfig.Config, hostConfig *runconfig.HostConfig, adjustCPUShares bool) (*Container, []string, error) {
+func (daemon *Daemon) ContainerCreate(name string, config *runconfig.Config, hostConfig *runconfig.HostConfig, adjustCPUShares bool) (types.ContainerCreateResponse, error) {
 	if config == nil {
-		return nil, nil, derr.ErrorCodeEmptyConfig
+		return types.ContainerCreateResponse{}, derr.ErrorCodeEmptyConfig
 	}
 
 	warnings, err := daemon.verifyContainerSettings(hostConfig, config)
 	if err != nil {
-		return nil, warnings, err
+		return types.ContainerCreateResponse{"", warnings}, err
 	}
 
 	daemon.adaptContainerSettings(hostConfig, adjustCPUShares)
 
-	container, buildWarnings, err := daemon.Create(config, hostConfig, name)
+	container, err := daemon.Create(config, hostConfig, name)
 	if err != nil {
 		if daemon.Graph().IsNotExist(err, config.Image) {
 			if strings.Contains(config.Image, "@") {
-				return nil, warnings, derr.ErrorCodeNoSuchImageHash.WithArgs(config.Image)
+				return types.ContainerCreateResponse{"", warnings}, derr.ErrorCodeNoSuchImageHash.WithArgs(config.Image)
 			}
 			img, tag := parsers.ParseRepositoryTag(config.Image)
 			if tag == "" {
 				tag = tags.DefaultTag
 			}
-			return nil, warnings, derr.ErrorCodeNoSuchImageTag.WithArgs(img, tag)
+			return types.ContainerCreateResponse{"", warnings}, derr.ErrorCodeNoSuchImageTag.WithArgs(img, tag)
 		}
-		return nil, warnings, err
+		return types.ContainerCreateResponse{"", warnings}, err
 	}
 
-	warnings = append(warnings, buildWarnings...)
-
-	return container, warnings, nil
+	return types.ContainerCreateResponse{container.ID, warnings}, nil
 }
 
 // Create creates a new container from the given configuration with a given name.
-func (daemon *Daemon) Create(config *runconfig.Config, hostConfig *runconfig.HostConfig, name string) (retC *Container, retS []string, retErr error) {
+func (daemon *Daemon) Create(config *runconfig.Config, hostConfig *runconfig.HostConfig, name string) (retC *Container, retErr error) {
 	var (
 		container *Container
-		warnings  []string
 		img       *image.Image
 		imgID     string
 		err       error
@@ -60,16 +57,16 @@ func (daemon *Daemon) Create(config *runconfig.Config, hostConfig *runconfig.Hos
 	if config.Image != "" {
 		img, err = daemon.repositories.LookupImage(config.Image)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if err = daemon.graph.CheckDepth(img); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		imgID = img.ID
 	}
 
 	if err := daemon.mergeAndVerifyConfig(config, img); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if hostConfig == nil {
@@ -78,11 +75,11 @@ func (daemon *Daemon) Create(config *runconfig.Config, hostConfig *runconfig.Hos
 	if hostConfig.SecurityOpt == nil {
 		hostConfig.SecurityOpt, err = daemon.generateSecurityOpt(hostConfig.IpcMode, hostConfig.PidMode)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if container, err = daemon.newContainer(name, config, imgID); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer func() {
 		if retErr != nil {
@@ -93,13 +90,13 @@ func (daemon *Daemon) Create(config *runconfig.Config, hostConfig *runconfig.Hos
 	}()
 
 	if err := daemon.Register(container); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := daemon.createRootfs(container); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := daemon.setHostConfig(container, hostConfig); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer func() {
 		if retErr != nil {
@@ -109,20 +106,20 @@ func (daemon *Daemon) Create(config *runconfig.Config, hostConfig *runconfig.Hos
 		}
 	}()
 	if err := container.Mount(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer container.Unmount()
 
 	if err := createContainerPlatformSpecificSettings(container, config, hostConfig, img); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if err := container.toDiskLocking(); err != nil {
 		logrus.Errorf("Error saving new container to disk: %v", err)
-		return nil, nil, err
+		return nil, err
 	}
 	container.logEvent("create")
-	return container, warnings, nil
+	return container, nil
 }
 
 func (daemon *Daemon) generateSecurityOpt(ipcMode runconfig.IpcMode, pidMode runconfig.PidMode) ([]string, error) {
