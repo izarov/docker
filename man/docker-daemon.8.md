@@ -9,6 +9,9 @@ docker-daemon - Enable daemon mode
 [**--api-cors-header**=[=*API-CORS-HEADER*]]
 [**-b**|**--bridge**[=*BRIDGE*]]
 [**--bip**[=*BIP*]]
+[**--cluster-store**[=*[]*]]
+[**--cluster-advertise**[=*[]*]]
+[**--cluster-store-opt**[=*map[]*]]
 [**-D**|**--debug**[=*false*]]
 [**--default-gateway**[=*DEFAULT-GATEWAY*]]
 [**--default-gateway-v6**[=*DEFAULT-GATEWAY-V6*]]
@@ -17,7 +20,6 @@ docker-daemon - Enable daemon mode
 [**--dns**[=*[]*]]
 [**--dns-opt**[=*[]*]]
 [**--dns-search**[=*[]*]]
-[**-e**|**--exec-driver**[=*native*]]
 [**--exec-opt**[=*[]*]]
 [**--exec-root**[=*/var/run/docker*]]
 [**--fixed-cidr**[=*FIXED-CIDR*]]
@@ -74,6 +76,17 @@ format.
 **--bip**=""
   Use the provided CIDR notation address for the dynamically created bridge (docker0); Mutually exclusive of \-b
 
+**--cluster-store**=""
+  URL of the distributed storage backend
+
+**--cluster-advertise**=""
+  Specifies the 'host:port' or `interface:port` combination that this particular
+  daemon instance should use when advertising itself to the cluster. The daemon
+  is reached through this value.
+
+**--cluster-store-opt**=""
+  Specifies options for the Key/Value store.
+
 **-D**, **--debug**=*true*|*false*
   Enable debug mode. Default is false.
 
@@ -97,9 +110,6 @@ format.
 
 **--dns-search**=[]
   DNS search domains to use.
-
-**-e**, **--exec-driver**=""
-  Force Docker to use specific exec driver. Default is `native`.
 
 **--exec-opt**=[]
   Set exec driver options. See EXEC DRIVER OPTIONS.
@@ -421,6 +431,31 @@ this topic, see
 [docker#4036](https://github.com/docker/docker/issues/4036).
 Otherwise, set this flag for migrating existing Docker daemons to a
 daemon with a supported environment.
+
+# CLUSTER STORE OPTIONS
+
+The daemon uses libkv to advertise
+the node within the cluster.  Some Key/Value backends support mutual
+TLS, and the client TLS settings used by the daemon can be configured
+using the **--cluster-store-opt** flag, specifying the paths to PEM encoded
+files.
+
+#### kv.cacertfile
+
+Specifies the path to a local file with PEM encoded CA certificates to trust
+
+#### kv.certfile
+
+Specifies the path to a local file with a PEM encoded certificate.  This
+certificate is used as the client cert for communication with the
+Key/Value store.
+
+#### kv.keyfile
+
+Specifies the path to a local file with a PEM encoded private key.  This
+private key is used as the client key for communication with the
+Key/Value store.
+
 
 # HISTORY
 Sept 2015, Originally compiled by Shishir Mahajan <shishir.mahajan@redhat.com>

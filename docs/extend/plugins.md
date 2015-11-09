@@ -18,9 +18,8 @@ plugins.
 
 Plugins extend Docker's functionality.  They come in specific types.  For
 example, a [volume plugin](plugins_volume.md) might enable Docker
-volumes to persist across multiple Docker hosts and a 
-[network plugin](plugins_network.md) might provide network plumbing
-using a favorite networking technology, such as vxlan overlay, ipvlan, EVPN, etc.
+volumes to persist across multiple Docker hosts and a
+[network plugin](plugins_network.md) might provide network plumbing.
 
 Currently Docker supports volume and network driver plugins. In the future it
 will support additional plugin types.
@@ -56,6 +55,9 @@ The following plugins exist:
 * The [Keywhiz plugin](https://github.com/calavera/docker-volume-keywhiz) is
   a plugin that provides credentials and secret management using Keywhiz as
   a central repository.
+
+* The [Netshare plugin](https://github.com/gondor/docker-volume-netshare) is a volume plugin
+  that provides volume management for NFS 3/4, AWS EFS and CIFS file systems.
 
 * The [Pachyderm PFS plugin](https://github.com/pachyderm/pachyderm/tree/master/src/cmd/pfs-volume-driver)
   is a volume plugin written in Go that provides functionality to mount Pachyderm File System (PFS)

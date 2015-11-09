@@ -146,6 +146,8 @@ type Status struct {
 	Data DiskUsage
 	// Metadata is the disk used for meta data.
 	Metadata DiskUsage
+	// BaseDeviceSize is base size of container and image
+	BaseDeviceSize uint64
 	// SectorSize size of the vector.
 	SectorSize uint64
 	// UdevSyncSupported is true if sync is supported.
@@ -597,6 +599,7 @@ func (devices *DeviceSet) cleanupDeletedDevices() error {
 
 	// If there are no deleted devices, there is nothing to do.
 	if devices.nrDeletedDevices == 0 {
+		devices.Unlock()
 		return nil
 	}
 
@@ -823,14 +826,21 @@ func (devices *DeviceSet) loadMetadata(hash string) *devInfo {
 func getDeviceUUID(device string) (string, error) {
 	out, err := exec.Command("blkid", "-s", "UUID", "-o", "value", device).Output()
 	if err != nil {
-		logrus.Debugf("Failed to find uuid for device %s:%v", device, err)
-		return "", err
+		return "", fmt.Errorf("Failed to find uuid for device %s:%v", device, err)
 	}
 
 	uuid := strings.TrimSuffix(string(out), "\n")
 	uuid = strings.TrimSpace(uuid)
 	logrus.Debugf("UUID for device: %s is:%s", device, uuid)
 	return uuid, nil
+}
+
+func (devices *DeviceSet) getBaseDeviceSize() uint64 {
+	info, _ := devices.lookupDevice("")
+	if info == nil {
+		return 0
+	}
+	return info.Size
 }
 
 func (devices *DeviceSet) verifyBaseDeviceUUID(baseInfo *devInfo) error {
@@ -1493,7 +1503,7 @@ func (devices *DeviceSet) initDevmapper(doInit bool) error {
 	}
 
 	// It seems libdevmapper opens this without O_CLOEXEC, and go exec will not close files
-	// that are not Close-on-exec, and lxc-start will die if it inherits any unexpected files,
+	// that are not Close-on-exec,
 	// so we add this badhack to make sure it closes itself
 	setCloseOnExec("/dev/mapper/control")
 
@@ -2198,6 +2208,7 @@ func (devices *DeviceSet) Status() *Status {
 	status.DeferredRemoveEnabled = devices.deferredRemove
 	status.DeferredDeleteEnabled = devices.deferredDelete
 	status.DeferredDeletedDeviceCount = devices.nrDeletedDevices
+	status.BaseDeviceSize = devices.getBaseDeviceSize()
 
 	totalSizeInSectors, _, dataUsed, dataTotal, metadataUsed, metadataTotal, err := devices.poolStatus()
 	if err == nil {
