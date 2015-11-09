@@ -93,7 +93,7 @@ func (l *JSONFileLogger) Log(msg *logger.Message) error {
 	if err != nil {
 		return err
 	}
-	err = (&jsonlog.JSONLogBytes{Log: append(msg.Line, '\n'), Stream: msg.Source, Created: timestamp}).MarshalJSONBuf(l.buf)
+	err = (&jsonlog.JSONLogBytes{Log: msg.Line, Stream: msg.Source, Created: timestamp}).MarshalJSONBuf(l.buf)
 	if err != nil {
 		return err
 	}
