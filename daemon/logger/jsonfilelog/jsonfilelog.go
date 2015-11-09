@@ -109,8 +109,8 @@ func (l *JSONFileLogger) Log(msg *logger.Message) error {
 	if err != nil {
 		return err
 	}
-	err = (&jsonlog.JSONLogs{
-		Log:      append(msg.Line, '\n'),
+	err = (&jsonlog.JSONLogBytes{
+		Log:      msg.Line,
 		Stream:   msg.Source,
 		Created:  timestamp,
 		RawAttrs: l.extra,
