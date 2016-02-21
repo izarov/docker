@@ -48,18 +48,18 @@ func (c *Copier) copySrc(name string, src io.Reader) {
 			return
 		default:
 			bytesRead, err := src.Read(buf)
-		if err == nil || bytesRead > 0 {
-			if logErr := c.dst.Log(&Message{ContainerID: c.cid, Line: buf[:bytesRead], Source: name, Timestamp: time.Now().UTC()}); logErr != nil {
-				logrus.Errorf("Failed to log msg %q for logger %s: %s", buf[:bytesRead], c.dst.Name(), logErr)
-			}
-
-			if err != nil {
-				if err != io.EOF {
-					logrus.Errorf("Error scanning log stream: %s", err)
+			if err == nil || bytesRead > 0 {
+				if logErr := c.dst.Log(&Message{ContainerID: c.cid, Line: buf[:bytesRead], Source: name, Timestamp: time.Now().UTC()}); logErr != nil {
+					logrus.Errorf("Failed to log msg %q for logger %s: %s", buf[:bytesRead], c.dst.Name(), logErr)
 				}
-				return
+
+				if err != nil {
+					if err != io.EOF {
+						logrus.Errorf("Error scanning log stream: %s", err)
+					}
+					return
+				}
 			}
-		}
 	}
 }
 
