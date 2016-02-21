@@ -6,11 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/execdriver"
 	derr "github.com/docker/docker/errors"
-	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/volume"
+	"github.com/docker/engine-api/types"
+	containertypes "github.com/docker/engine-api/types/container"
 	"github.com/opencontainers/runc/libcontainer/label"
 )
 
@@ -29,16 +30,6 @@ func volumeToAPIType(v volume.Volume) *types.Volume {
 		Driver:     v.DriverName(),
 		Mountpoint: v.Path(),
 	}
-}
-
-// createVolume creates a volume.
-func (daemon *Daemon) createVolume(name, driverName string, opts map[string]string) (volume.Volume, error) {
-	v, err := daemon.volumes.Create(name, driverName, opts)
-	if err != nil {
-		return nil, err
-	}
-	daemon.volumes.Increment(v)
-	return v, nil
 }
 
 // Len returns the number of mounts. Used in sorting.
@@ -69,7 +60,8 @@ func (m mounts) parts(i int) int {
 // 1. Select the previously configured mount points for the containers, if any.
 // 2. Select the volumes mounted from another containers. Overrides previously configured mount point destination.
 // 3. Select the bind mounts set by the client. Overrides previously configured mount point destinations.
-func (daemon *Daemon) registerMountPoints(container *Container, hostConfig *runconfig.HostConfig) error {
+// 4. Cleanup old volumes that are about to be reassigned.
+func (daemon *Daemon) registerMountPoints(container *container.Container, hostConfig *containertypes.HostConfig) error {
 	binds := map[string]bool{}
 	mountPoints := map[string]*volume.MountPoint{}
 
@@ -85,7 +77,7 @@ func (daemon *Daemon) registerMountPoints(container *Container, hostConfig *runc
 			return err
 		}
 
-		c, err := daemon.Get(containerID)
+		c, err := daemon.GetContainer(containerID)
 		if err != nil {
 			return err
 		}
@@ -97,10 +89,12 @@ func (daemon *Daemon) registerMountPoints(container *Container, hostConfig *runc
 				RW:          m.RW && volume.ReadWrite(mode),
 				Driver:      m.Driver,
 				Destination: m.Destination,
+				Propagation: m.Propagation,
+				Named:       m.Named,
 			}
 
 			if len(cp.Source) == 0 {
-				v, err := daemon.createVolume(cp.Name, cp.Driver, nil)
+				v, err := daemon.volumes.GetWithRef(cp.Name, cp.Driver, container.ID)
 				if err != nil {
 					return err
 				}
@@ -120,12 +114,12 @@ func (daemon *Daemon) registerMountPoints(container *Container, hostConfig *runc
 		}
 
 		if binds[bind.Destination] {
-			return derr.ErrorCodeVolumeDup.WithArgs(bind.Destination)
+			return derr.ErrorCodeMountDup.WithArgs(bind.Destination)
 		}
 
-		if len(bind.Name) > 0 && len(bind.Driver) > 0 {
+		if len(bind.Name) > 0 {
 			// create the volume
-			v, err := daemon.createVolume(bind.Name, bind.Driver, nil)
+			v, err := daemon.volumes.CreateWithRef(bind.Name, bind.Driver, container.ID, nil)
 			if err != nil {
 				return err
 			}
@@ -133,23 +127,44 @@ func (daemon *Daemon) registerMountPoints(container *Container, hostConfig *runc
 			bind.Source = v.Path()
 			// bind.Name is an already existing volume, we need to use that here
 			bind.Driver = v.DriverName()
+			bind.Named = true
 			bind = setBindModeIfNull(bind)
 		}
-		shared := label.IsShared(bind.Mode)
-		if err := label.Relabel(bind.Source, container.MountLabel, shared); err != nil {
-			return err
+		if label.RelabelNeeded(bind.Mode) {
+			if err := label.Relabel(bind.Source, container.MountLabel, label.IsShared(bind.Mode)); err != nil {
+				return err
+			}
 		}
 		binds[bind.Destination] = true
 		mountPoints[bind.Destination] = bind
 	}
 
-	bcVolumes, bcVolumesRW := configureBackCompatStructures(daemon, container, mountPoints)
-
 	container.Lock()
+
+	// 4. Cleanup old volumes that are about to be reassigned.
+	for _, m := range mountPoints {
+		if m.BackwardsCompatible() {
+			if mp, exists := container.MountPoints[m.Destination]; exists && mp.Volume != nil {
+				daemon.volumes.Dereference(mp.Volume, container.ID)
+			}
+		}
+	}
 	container.MountPoints = mountPoints
-	setBackCompatStructures(container, bcVolumes, bcVolumesRW)
 
 	container.Unlock()
 
+	return nil
+}
+
+// lazyInitializeVolume initializes a mountpoint's volume if needed.
+// This happens after a daemon restart.
+func (daemon *Daemon) lazyInitializeVolume(containerID string, m *volume.MountPoint) error {
+	if len(m.Driver) > 0 && m.Volume == nil {
+		v, err := daemon.volumes.GetWithRef(m.Name, m.Driver, containerID)
+		if err != nil {
+			return err
+		}
+		m.Volume = v
+	}
 	return nil
 }

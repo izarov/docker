@@ -22,16 +22,12 @@ To run, I need:
   environment variables AWS_S3_BUCKET and AWS_S3_BUCKET_PATH (default: '');
 - to be provided with AWS credentials for this S3 bucket, in environment
   variables AWS_ACCESS_KEY and AWS_SECRET_KEY;
-- the passphrase to unlock the GPG key specified by the optional environment
-  variable GPG_KEYID (default: releasedocker) which will sign the deb
-  packages (passed as environment variable GPG_PASSPHRASE);
 - a generous amount of good will and nice manners.
 The canonical way to run me is to run the image produced by the Dockerfile: e.g.:"
 
 docker run -e AWS_S3_BUCKET=test.docker.com \
            -e AWS_ACCESS_KEY=... \
            -e AWS_SECRET_KEY=... \
-           -e GPG_PASSPHRASE=... \
            -i -t --privileged \
            docker ./hack/release.sh
 EOF
@@ -41,8 +37,6 @@ EOF
 [ "$AWS_S3_BUCKET" ] || usage
 [ "$AWS_ACCESS_KEY" ] || usage
 [ "$AWS_SECRET_KEY" ] || usage
-[ "$GPG_PASSPHRASE" ] || usage
-: ${GPG_KEYID:=releasedocker}
 [ -d /go/src/github.com/docker/docker ] || usage
 cd /go/src/github.com/docker/docker
 [ -x hack/make.sh ] || usage
@@ -51,7 +45,6 @@ RELEASE_BUNDLES=(
 	binary
 	cross
 	tgz
-	ubuntu
 )
 
 if [ "$1" != '--release-regardless-of-test-failure' ]; then
@@ -88,7 +81,8 @@ setup_s3() {
 	# s3cmd has no useful exit status, so we cannot check that.
 	# Instead, we check if it outputs anything on standard output.
 	# (When there are problems, it uses standard error instead.)
-	s3cmd info "s3://$BUCKET" | grep -q .
+	# NOTE: for some reason on debian:jessie `s3cmd info ... | grep -q .` results in a broken pipe
+	s3cmd info "s3://$BUCKET" | grep . >/dev/null
 	# Make the bucket accessible through website endpoints.
 	s3cmd ws-create --ws-index index --ws-error error "s3://$BUCKET"
 }
@@ -232,7 +226,7 @@ release_build() {
 			;;
 		arm)
 			s3Arch=armel
-			# someday, we might potentially support mutliple GOARM values, in which case we might get armhf here too
+			# someday, we might potentially support multiple GOARM values, in which case we might get armhf here too
 			;;
 		*)
 			echo >&2 "error: can't convert $s3Arch to an appropriate value for 'uname -m'"
@@ -259,69 +253,6 @@ release_build() {
 
 	upload_release_build "$binDir/$binary" "$s3Dir/$binary" "$latest"
 	upload_release_build "$tgzDir/$tgz" "$s3Dir/$tgz" "$latestTgz"
-}
-
-# Upload the 'ubuntu' bundle to S3:
-# 1. A full APT repository is published at $BUCKET/ubuntu/
-# 2. Instructions for using the APT repository are uploaded at $BUCKET/ubuntu/index
-release_ubuntu() {
-	echo "Releasing ubuntu"
-	[ -e "bundles/$VERSION/ubuntu" ] || {
-		echo >&2 './hack/make.sh must be run before release_ubuntu'
-		exit 1
-	}
-
-	local debfiles=( "bundles/$VERSION/ubuntu/"*.deb )
-
-	# Sign our packages
-	dpkg-sig -g "--passphrase $GPG_PASSPHRASE" -k "$GPG_KEYID" --sign builder "${debfiles[@]}"
-
-	# Setup the APT repo
-	APTDIR=bundles/$VERSION/ubuntu/apt
-	mkdir -p "$APTDIR/conf" "$APTDIR/db"
-	s3cmd sync "s3://$BUCKET/ubuntu/db/" "$APTDIR/db/" || true
-	cat > "$APTDIR/conf/distributions" <<EOF
-Codename: docker
-Components: main
-Architectures: amd64 i386
-EOF
-
-	# Add the DEB package to the APT repo
-	reprepro -b "$APTDIR" includedeb docker "${debfiles[@]}"
-
-	# Sign
-	for F in $(find $APTDIR -name Release); do
-		gpg -u "$GPG_KEYID" --passphrase "$GPG_PASSPHRASE" \
-			--armor --sign --detach-sign \
-			--output "$F.gpg" "$F"
-	done
-
-	# Upload keys
-	s3cmd sync "$HOME/.gnupg/" "s3://$BUCKET/ubuntu/.gnupg/"
-	gpg --armor --export "$GPG_KEYID" > "bundles/$VERSION/ubuntu/gpg"
-	s3cmd --acl-public put "bundles/$VERSION/ubuntu/gpg" "s3://$BUCKET/gpg"
-
-	local gpgFingerprint=36A1D7869245C8950F966E92D8576A8BA88D21E9
-	local s3Headers=
-	if [[ $BUCKET == test* ]]; then
-		gpgFingerprint=740B314AE3941731B942C66ADF4FD13717AAD7D6
-	elif [[ $BUCKET == experimental* ]]; then
-		gpgFingerprint=E33FF7BF5C91D50A6F91FFFD4CC38D40F9A96B49
-		s3Headers='--add-header=Cache-Control:no-cache'
-	fi
-
-	# Upload repo
-	s3cmd --acl-public $s3Headers sync "$APTDIR/" "s3://$BUCKET/ubuntu/"
-	cat <<EOF | write_to_s3 s3://$BUCKET/ubuntu/index
-echo "# WARNING! This script is deprecated. Please use the script"
-echo "# at https://get.docker.com/"
-EOF
-
-	# Add redirect at /ubuntu/info for URL-backwards-compatibility
-	rm -rf /tmp/emptyfile && touch /tmp/emptyfile
-	s3cmd --acl-public --add-header='x-amz-website-redirect-location:/ubuntu/' --mime-type='text/plain' put /tmp/emptyfile "s3://$BUCKET/ubuntu/info"
-
-	echo "APT repository uploaded. Instructions available at $(s3_url)/ubuntu"
 }
 
 # Upload binaries and tgz files to S3
@@ -359,7 +290,8 @@ EOF
 # Upload the index script
 release_index() {
 	echo "Releasing index"
-	sed "s,url='https://get.docker.com/',url='$(s3_url)/'," hack/install.sh | write_to_s3 "s3://$BUCKET_PATH/index"
+	url="$(s3_url)/" hack/make.sh install-script
+	write_to_s3 "s3://$BUCKET_PATH/index" < "bundles/$VERSION/install-script/install.sh"
 }
 
 release_test() {
@@ -369,31 +301,10 @@ release_test() {
 	fi
 }
 
-setup_gpg() {
-	echo "Setting up GPG"
-	# Make sure that we have our keys
-	mkdir -p "$HOME/.gnupg/"
-	s3cmd sync "s3://$BUCKET/ubuntu/.gnupg/" "$HOME/.gnupg/" || true
-	gpg --list-keys "$GPG_KEYID" >/dev/null || {
-		gpg --gen-key --batch <<EOF
-Key-Type: RSA
-Key-Length: 4096
-Passphrase: $GPG_PASSPHRASE
-Name-Real: Docker Release Tool
-Name-Email: docker@docker.com
-Name-Comment: $GPG_KEYID
-Expire-Date: 0
-%commit
-EOF
-	}
-}
-
 main() {
 	build_all
 	setup_s3
-	setup_gpg
 	release_binaries
-	release_ubuntu
 	release_index
 	release_test
 }
@@ -407,10 +318,8 @@ echo "Use the following text to announce the release:"
 echo
 echo "We have just pushed $VERSION to $(s3_url). You can download it with the following:"
 echo
-echo "Ubuntu/Debian: curl -sSL $(s3_url) | sh"
 echo "Linux 64bit binary: $(s3_url)/builds/Linux/x86_64/docker-$VERSION"
 echo "Darwin/OSX 64bit client binary: $(s3_url)/builds/Darwin/x86_64/docker-$VERSION"
-echo "Darwin/OSX 32bit client binary: $(s3_url)/builds/Darwin/i386/docker-$VERSION"
 echo "Linux 64bit tgz: $(s3_url)/builds/Linux/x86_64/docker-$VERSION.tgz"
 echo "Windows 64bit client binary: $(s3_url)/builds/Windows/x86_64/docker-$VERSION.exe"
 echo "Windows 32bit client binary: $(s3_url)/builds/Windows/i386/docker-$VERSION.exe"

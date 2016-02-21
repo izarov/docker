@@ -3,8 +3,11 @@
 package seccomp
 
 import (
+	"bufio"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"syscall"
 
 	"github.com/opencontainers/runc/libcontainer/configs"
@@ -15,7 +18,11 @@ var (
 	actAllow = libseccomp.ActAllow
 	actTrap  = libseccomp.ActTrap
 	actKill  = libseccomp.ActKill
+	actTrace = libseccomp.ActTrace.SetReturnCode(int16(syscall.EPERM))
 	actErrno = libseccomp.ActErrno.SetReturnCode(int16(syscall.EPERM))
+
+	// SeccompModeFilter refers to the syscall argument SECCOMP_MODE_FILTER.
+	SeccompModeFilter = uintptr(2)
 )
 
 // Filters given syscalls in a container, preventing them from being used
@@ -72,6 +79,24 @@ func InitSeccomp(config *configs.Seccomp) error {
 	return nil
 }
 
+// IsEnabled returns if the kernel has been configured to support seccomp.
+func IsEnabled() bool {
+	// Try to read from /proc/self/status for kernels > 3.8
+	s, err := parseStatusFile("/proc/self/status")
+	if err != nil {
+		// Check if Seccomp is supported, via CONFIG_SECCOMP.
+		if _, _, err := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_GET_SECCOMP, 0, 0); err != syscall.EINVAL {
+			// Make sure the kernel has CONFIG_SECCOMP_FILTER.
+			if _, _, err := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_SECCOMP, SeccompModeFilter, 0); err != syscall.EINVAL {
+				return true
+			}
+		}
+		return false
+	}
+	_, ok := s["Seccomp"]
+	return ok
+}
+
 // Convert Libcontainer Action to Libseccomp ScmpAction
 func getAction(act configs.Action) (libseccomp.ScmpAction, error) {
 	switch act {
@@ -83,6 +108,8 @@ func getAction(act configs.Action) (libseccomp.ScmpAction, error) {
 		return actTrap, nil
 	case configs.Allow:
 		return actAllow, nil
+	case configs.Trace:
+		return actTrace, nil
 	default:
 		return libseccomp.ActInvalid, fmt.Errorf("invalid action, cannot use in rule")
 	}
@@ -174,4 +201,31 @@ func matchCall(filter *libseccomp.ScmpFilter, call *configs.Syscall) error {
 	}
 
 	return nil
+}
+
+func parseStatusFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	s := bufio.NewScanner(f)
+	status := make(map[string]string)
+
+	for s.Scan() {
+		if err := s.Err(); err != nil {
+			return nil, err
+		}
+
+		text := s.Text()
+		parts := strings.Split(text, ":")
+
+		if len(parts) <= 1 {
+			continue
+		}
+
+		status[parts[0]] = parts[1]
+	}
+	return status, nil
 }

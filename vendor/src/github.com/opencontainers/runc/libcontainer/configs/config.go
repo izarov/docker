@@ -33,17 +33,18 @@ type Seccomp struct {
 type Action int
 
 const (
-	Kill Action = iota - 4
+	Kill Action = iota + 1
 	Errno
 	Trap
 	Allow
+	Trace
 )
 
 // A comparison operator to be used when matching syscall arguments in Seccomp
 type Operator int
 
 const (
-	EqualTo Operator = iota
+	EqualTo Operator = iota + 1
 	NotEqualTo
 	GreaterThan
 	GreaterThanOrEqualTo
@@ -170,6 +171,9 @@ type Config struct {
 	// A default action to be taken if no rules match is also given.
 	Seccomp *Seccomp `json:"seccomp"`
 
+	// NoNewPrivileges controls whether processes in the container can gain additional privileges.
+	NoNewPrivileges bool `json:"no_new_privileges"`
+
 	// Hooks are a collection of actions to perform at various container lifecycle events.
 	// Hooks are not able to be marshaled to json but they are also not needed to.
 	Hooks *Hooks `json:"-"`
@@ -182,6 +186,9 @@ type Hooks struct {
 	// Prestart commands are executed after the container namespaces are created,
 	// but before the user supplied command is executed from init.
 	Prestart []Hook
+
+	// Poststart commands are executed after the container init process starts.
+	Poststart []Hook
 
 	// Poststop commands are executed after the container init process exits.
 	Poststop []Hook

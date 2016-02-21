@@ -25,21 +25,17 @@ var (
 		func() bool { return daemonPlatform == "windows" },
 		"Test requires a Windows daemon",
 	}
-	WindowsDaemonSupportsVolumes = testRequirement{
-		func() bool {
-			if daemonPlatform != "windows" {
-				return false
-			}
-			if windowsDaemonKV == 0 {
-				panic("windowsDaemonKV is not set")
-			}
-			return windowsDaemonKV >= 10559
-		},
-		"Test requires a Windows daemon that supports volumes",
-	}
 	DaemonIsLinux = testRequirement{
 		func() bool { return daemonPlatform == "linux" },
 		"Test requires a Linux daemon",
+	}
+	NotArm = testRequirement{
+		func() bool { return os.Getenv("DOCKER_ENGINE_GOARCH") != "arm" },
+		"Test requires a daemon not running on ARM",
+	}
+	NotPpc64le = testRequirement{
+		func() bool { return os.Getenv("DOCKER_ENGINE_GOARCH") != "ppc64le" },
+		"Test requires a daemon not running on ppc64le",
 	}
 	SameHostDaemon = testRequirement{
 		func() bool { return isLocalDaemon },
@@ -111,6 +107,18 @@ var (
 		},
 		"Test requires underlying root filesystem not be backed by overlay.",
 	}
+
+	Devicemapper = testRequirement{
+		func() bool {
+			cmd := exec.Command("grep", "^devicemapper / devicemapper", "/proc/mounts")
+			if err := cmd.Run(); err != nil {
+				return false
+			}
+			return true
+		},
+		"Test requires underlying root filesystem to be backed by devicemapper.",
+	}
+
 	IPv6 = testRequirement{
 		func() bool {
 			cmd := exec.Command("test", "-f", "/proc/net/if_inet6")

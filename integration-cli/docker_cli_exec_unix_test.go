@@ -35,13 +35,13 @@ func (s *DockerSuite) TestExecInteractiveStdinClose(c *check.C) {
 		c.Assert(err, checker.IsNil)
 		output := b.String()
 		c.Assert(strings.TrimSpace(output), checker.Equals, "hello")
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		c.Fatal("timed out running docker exec")
 	}
 }
 
 func (s *DockerSuite) TestExecTTY(c *check.C) {
-	testRequires(c, DaemonIsLinux)
+	testRequires(c, DaemonIsLinux, SameHostDaemon)
 	dockerCmd(c, "run", "-d", "--name=test", "busybox", "sh", "-c", "echo hello > /foo && top")
 
 	cmd := exec.Command(dockerBinary, "exec", "-it", "test", "sh")
@@ -49,7 +49,7 @@ func (s *DockerSuite) TestExecTTY(c *check.C) {
 	c.Assert(err, checker.IsNil)
 	defer p.Close()
 
-	_, err = p.Write([]byte("cat /foo && exit\n"))
+	_, err = p.Write([]byte("cat /foo && sleep 2 && exit\n"))
 	c.Assert(err, checker.IsNil)
 
 	chErr := make(chan error)

@@ -1,18 +1,16 @@
 package client
 
 import (
-	"bufio"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"time"
@@ -22,18 +20,28 @@ import (
 	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/distribution/registry/client/transport"
 	"github.com/docker/docker/cliconfig"
-	"github.com/docker/docker/pkg/ansiescape"
-	"github.com/docker/docker/pkg/ioutils"
+	"github.com/docker/docker/distribution"
+	"github.com/docker/docker/dockerversion"
+	"github.com/docker/docker/pkg/jsonmessage"
 	flag "github.com/docker/docker/pkg/mflag"
-	"github.com/docker/docker/pkg/tlsconfig"
+	"github.com/docker/docker/reference"
 	"github.com/docker/docker/registry"
+	apiclient "github.com/docker/engine-api/client"
+	"github.com/docker/engine-api/types"
+	registrytypes "github.com/docker/engine-api/types/registry"
+	"github.com/docker/go-connections/tlsconfig"
 	"github.com/docker/notary/client"
-	"github.com/docker/notary/pkg/passphrase"
+	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/trustmanager"
-	"github.com/endophage/gotuf/data"
+	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/tuf/signed"
+	"github.com/docker/notary/tuf/store"
 )
 
-var untrusted bool
+var (
+	releasesRole = path.Join(data.CanonicalTargetsRole, "releases")
+	untrusted    bool
+)
 
 func addTrustedFlags(fs *flag.FlagSet, verify bool) {
 	var trusted bool
@@ -53,8 +61,6 @@ func addTrustedFlags(fs *flag.FlagSet, verify bool) {
 func isTrusted() bool {
 	return !untrusted
 }
-
-var targetRegexp = regexp.MustCompile(`([\S]+): digest: ([\S]+) size: ([\d]+)`)
 
 type target struct {
 	reference registry.Reference
@@ -78,7 +84,7 @@ func (cli *DockerCli) certificateDirectory(server string) (string, error) {
 	return filepath.Join(cliconfig.ConfigDir(), "tls", u.Host), nil
 }
 
-func trustServer(index *registry.IndexInfo) (string, error) {
+func trustServer(index *registrytypes.IndexInfo) (string, error) {
 	if s := os.Getenv("DOCKER_CONTENT_TRUST_SERVER"); s != "" {
 		urlObj, err := url.Parse(s)
 		if err != nil || urlObj.Scheme != "https" {
@@ -94,14 +100,17 @@ func trustServer(index *registry.IndexInfo) (string, error) {
 }
 
 type simpleCredentialStore struct {
-	auth cliconfig.AuthConfig
+	auth types.AuthConfig
 }
 
 func (scs simpleCredentialStore) Basic(u *url.URL) (string, string) {
 	return scs.auth.Username, scs.auth.Password
 }
 
-func (cli *DockerCli) getNotaryRepository(repoInfo *registry.RepositoryInfo, authConfig cliconfig.AuthConfig) (*client.NotaryRepository, error) {
+// getNotaryRepository returns a NotaryRepository which stores all the
+// information needed to operate on a notary repository.
+// It creates a HTTP transport providing authentication support.
+func (cli *DockerCli) getNotaryRepository(repoInfo *registry.RepositoryInfo, authConfig types.AuthConfig, actions ...string) (*client.NotaryRepository, error) {
 	server, err := trustServer(repoInfo.Index)
 	if err != nil {
 		return nil, err
@@ -134,7 +143,7 @@ func (cli *DockerCli) getNotaryRepository(repoInfo *registry.RepositoryInfo, aut
 	}
 
 	// Skip configuration headers since request is not going to Docker daemon
-	modifiers := registry.DockerHeaders(http.Header{})
+	modifiers := registry.DockerHeaders(dockerversion.DockerUserAgent(), http.Header{})
 	authTransport := transport.NewTransport(base, modifiers...)
 	pingClient := &http.Client{
 		Transport: authTransport,
@@ -163,12 +172,12 @@ func (cli *DockerCli) getNotaryRepository(repoInfo *registry.RepositoryInfo, aut
 	}
 
 	creds := simpleCredentialStore{auth: authConfig}
-	tokenHandler := auth.NewTokenHandler(authTransport, creds, repoInfo.CanonicalName, "push", "pull")
+	tokenHandler := auth.NewTokenHandler(authTransport, creds, repoInfo.FullName(), actions...)
 	basicHandler := auth.NewBasicHandler(creds)
 	modifiers = append(modifiers, transport.RequestModifier(auth.NewAuthorizer(challengeManager, tokenHandler, basicHandler)))
 	tr := transport.NewTransport(base, modifiers...)
 
-	return client.NewNotaryRepository(cli.trustDirectory(), repoInfo.CanonicalName, server, tr, cli.getPassphraseRetriever())
+	return client.NewNotaryRepository(cli.trustDirectory(), repoInfo.FullName(), server, tr, cli.getPassphraseRetriever())
 }
 
 func convertTarget(t client.Target) (target, error) {
@@ -185,15 +194,17 @@ func convertTarget(t client.Target) (target, error) {
 
 func (cli *DockerCli) getPassphraseRetriever() passphrase.Retriever {
 	aliasMap := map[string]string{
-		"root":     "root",
-		"snapshot": "repository",
-		"targets":  "repository",
+		"root":             "root",
+		"snapshot":         "repository",
+		"targets":          "repository",
+		"targets/releases": "repository",
 	}
 	baseRetriever := passphrase.PromptRetrieverWithInOut(cli.in, cli.out, aliasMap)
 	env := map[string]string{
-		"root":     os.Getenv("DOCKER_CONTENT_TRUST_ROOT_PASSPHRASE"),
-		"snapshot": os.Getenv("DOCKER_CONTENT_TRUST_REPOSITORY_PASSPHRASE"),
-		"targets":  os.Getenv("DOCKER_CONTENT_TRUST_REPOSITORY_PASSPHRASE"),
+		"root":             os.Getenv("DOCKER_CONTENT_TRUST_ROOT_PASSPHRASE"),
+		"snapshot":         os.Getenv("DOCKER_CONTENT_TRUST_REPOSITORY_PASSPHRASE"),
+		"targets":          os.Getenv("DOCKER_CONTENT_TRUST_REPOSITORY_PASSPHRASE"),
+		"targets/releases": os.Getenv("DOCKER_CONTENT_TRUST_REPOSITORY_PASSPHRASE"),
 	}
 
 	// Backwards compatibility with old env names. We should remove this in 1.10
@@ -203,10 +214,11 @@ func (cli *DockerCli) getPassphraseRetriever() passphrase.Retriever {
 			fmt.Fprintf(cli.err, "[DEPRECATED] The environment variable DOCKER_CONTENT_TRUST_OFFLINE_PASSPHRASE has been deprecated and will be removed in v1.10. Please use DOCKER_CONTENT_TRUST_ROOT_PASSPHRASE\n")
 		}
 	}
-	if env["snapshot"] == "" || env["targets"] == "" {
+	if env["snapshot"] == "" || env["targets"] == "" || env["targets/releases"] == "" {
 		if passphrase := os.Getenv("DOCKER_CONTENT_TRUST_TAGGING_PASSPHRASE"); passphrase != "" {
 			env["snapshot"] = passphrase
 			env["targets"] = passphrase
+			env["targets/releases"] = passphrase
 			fmt.Fprintf(cli.err, "[DEPRECATED] The environment variable DOCKER_CONTENT_TRUST_TAGGING_PASSPHRASE has been deprecated and will be removed in v1.10. Please use DOCKER_CONTENT_TRUST_REPOSITORY_PASSPHRASE\n")
 		}
 	}
@@ -219,14 +231,14 @@ func (cli *DockerCli) getPassphraseRetriever() passphrase.Retriever {
 	}
 }
 
-func (cli *DockerCli) trustedReference(repo string, ref registry.Reference) (registry.Reference, error) {
-	repoInfo, err := registry.ParseRepositoryInfo(repo)
+func (cli *DockerCli) trustedReference(ref reference.NamedTagged) (reference.Canonical, error) {
+	repoInfo, err := registry.ParseRepositoryInfo(ref)
 	if err != nil {
 		return nil, err
 	}
 
 	// Resolve the Auth config relevant for this server
-	authConfig := registry.ResolveAuthConfig(cli.configFile, repoInfo.Index)
+	authConfig := cli.resolveAuthConfig(cli.configFile.AuthConfigs, repoInfo.Index)
 
 	notaryRepo, err := cli.getNotaryRepository(repoInfo, authConfig)
 	if err != nil {
@@ -234,57 +246,66 @@ func (cli *DockerCli) trustedReference(repo string, ref registry.Reference) (reg
 		return nil, err
 	}
 
-	t, err := notaryRepo.GetTargetByName(ref.String())
+	t, err := notaryRepo.GetTargetByName(ref.Tag(), releasesRole, data.CanonicalTargetsRole)
 	if err != nil {
 		return nil, err
 	}
-	r, err := convertTarget(*t)
+	r, err := convertTarget(t.Target)
 	if err != nil {
 		return nil, err
 
 	}
 
-	return registry.DigestReference(r.digest), nil
+	return reference.WithDigest(ref, r.digest)
 }
 
-func (cli *DockerCli) tagTrusted(repoInfo *registry.RepositoryInfo, trustedRef, ref registry.Reference) error {
-	fullName := trustedRef.ImageName(repoInfo.LocalName)
-	fmt.Fprintf(cli.out, "Tagging %s as %s\n", fullName, ref.ImageName(repoInfo.LocalName))
-	tv := url.Values{}
-	tv.Set("repo", repoInfo.LocalName)
-	tv.Set("tag", ref.String())
-	tv.Set("force", "1")
+func (cli *DockerCli) tagTrusted(trustedRef reference.Canonical, ref reference.NamedTagged) error {
+	fmt.Fprintf(cli.out, "Tagging %s as %s\n", trustedRef.String(), ref.String())
 
-	if _, _, err := readBody(cli.call("POST", "/images/"+fullName+"/tag?"+tv.Encode(), nil, nil)); err != nil {
-		return err
+	options := types.ImageTagOptions{
+		ImageID:        trustedRef.String(),
+		RepositoryName: trustedRef.Name(),
+		Tag:            ref.Tag(),
+		Force:          true,
 	}
 
-	return nil
+	return cli.client.ImageTag(options)
 }
 
-func notaryError(err error) error {
+func notaryError(repoName string, err error) error {
 	switch err.(type) {
 	case *json.SyntaxError:
 		logrus.Debugf("Notary syntax error: %s", err)
-		return errors.New("no trust data available for remote repository")
-	case client.ErrExpired:
-		return fmt.Errorf("remote repository out-of-date: %v", err)
+		return fmt.Errorf("Error: no trust data available for remote repository %s. Try running notary server and setting DOCKER_CONTENT_TRUST_SERVER to its HTTPS address?", repoName)
+	case signed.ErrExpired:
+		return fmt.Errorf("Error: remote repository %s out-of-date: %v", repoName, err)
 	case trustmanager.ErrKeyNotFound:
-		return fmt.Errorf("signing keys not found: %v", err)
+		return fmt.Errorf("Error: signing keys for remote repository %s not found: %v", repoName, err)
 	case *net.OpError:
-		return fmt.Errorf("error contacting notary server: %v", err)
+		return fmt.Errorf("Error: error contacting notary server: %v", err)
+	case store.ErrMetaNotFound:
+		return fmt.Errorf("Error: trust data missing for remote repository %s or remote repository not found: %v", repoName, err)
+	case signed.ErrInvalidKeyType:
+		return fmt.Errorf("Warning: potential malicious behavior - trust data mismatch for remote repository %s: %v", repoName, err)
+	case signed.ErrNoKeys:
+		return fmt.Errorf("Error: could not find signing keys for remote repository %s, or could not decrypt signing key: %v", repoName, err)
+	case signed.ErrLowVersion:
+		return fmt.Errorf("Warning: potential malicious behavior - trust data version is lower than expected for remote repository %s: %v", repoName, err)
+	case signed.ErrRoleThreshold:
+		return fmt.Errorf("Warning: potential malicious behavior - trust data has insufficient signatures for remote repository %s: %v", repoName, err)
+	case client.ErrRepositoryNotExist:
+		return fmt.Errorf("Error: remote trust data does not exist for %s: %v", repoName, err)
+	case signed.ErrInsufficientSignatures:
+		return fmt.Errorf("Error: could not produce valid signature for %s.  If Yubikey was used, was touch input provided?: %v", repoName, err)
 	}
 
 	return err
 }
 
-func (cli *DockerCli) trustedPull(repoInfo *registry.RepositoryInfo, ref registry.Reference, authConfig cliconfig.AuthConfig) error {
-	var (
-		v    = url.Values{}
-		refs = []target{}
-	)
+func (cli *DockerCli) trustedPull(repoInfo *registry.RepositoryInfo, ref registry.Reference, authConfig types.AuthConfig, requestPrivilege apiclient.RequestPrivilegeFunc) error {
+	var refs []target
 
-	notaryRepo, err := cli.getNotaryRepository(repoInfo, authConfig)
+	notaryRepo, err := cli.getNotaryRepository(repoInfo, authConfig, "pull")
 	if err != nil {
 		fmt.Fprintf(cli.out, "Error establishing connection to trust repository: %s\n", err)
 		return err
@@ -292,24 +313,24 @@ func (cli *DockerCli) trustedPull(repoInfo *registry.RepositoryInfo, ref registr
 
 	if ref.String() == "" {
 		// List all targets
-		targets, err := notaryRepo.ListTargets()
+		targets, err := notaryRepo.ListTargets(releasesRole, data.CanonicalTargetsRole)
 		if err != nil {
-			return notaryError(err)
+			return notaryError(repoInfo.FullName(), err)
 		}
 		for _, tgt := range targets {
-			t, err := convertTarget(*tgt)
+			t, err := convertTarget(tgt.Target)
 			if err != nil {
-				fmt.Fprintf(cli.out, "Skipping target for %q\n", repoInfo.LocalName)
+				fmt.Fprintf(cli.out, "Skipping target for %q\n", repoInfo.Name())
 				continue
 			}
 			refs = append(refs, t)
 		}
 	} else {
-		t, err := notaryRepo.GetTargetByName(ref.String())
+		t, err := notaryRepo.GetTargetByName(ref.String(), releasesRole, data.CanonicalTargetsRole)
 		if err != nil {
-			return notaryError(err)
+			return notaryError(repoInfo.FullName(), err)
 		}
-		r, err := convertTarget(*t)
+		r, err := convertTarget(t.Target)
 		if err != nil {
 			return err
 
@@ -317,103 +338,60 @@ func (cli *DockerCli) trustedPull(repoInfo *registry.RepositoryInfo, ref registr
 		refs = append(refs, r)
 	}
 
-	v.Set("fromImage", repoInfo.LocalName)
 	for i, r := range refs {
 		displayTag := r.reference.String()
 		if displayTag != "" {
 			displayTag = ":" + displayTag
 		}
-		fmt.Fprintf(cli.out, "Pull (%d of %d): %s%s@%s\n", i+1, len(refs), repoInfo.LocalName, displayTag, r.digest)
-		v.Set("tag", r.digest.String())
+		fmt.Fprintf(cli.out, "Pull (%d of %d): %s%s@%s\n", i+1, len(refs), repoInfo.Name(), displayTag, r.digest)
 
-		_, _, err = cli.clientRequestAttemptLogin("POST", "/images/create?"+v.Encode(), nil, cli.out, repoInfo.Index, "pull")
-		if err != nil {
+		if err := cli.imagePullPrivileged(authConfig, repoInfo.Name(), r.digest.String(), requestPrivilege); err != nil {
 			return err
 		}
 
 		// If reference is not trusted, tag by trusted reference
 		if !r.reference.HasDigest() {
-			if err := cli.tagTrusted(repoInfo, registry.DigestReference(r.digest), r.reference); err != nil {
+			tagged, err := reference.WithTag(repoInfo, r.reference.String())
+			if err != nil {
 				return err
-
+			}
+			trustedRef, err := reference.WithDigest(repoInfo, r.digest)
+			if err != nil {
+				return err
+			}
+			if err := cli.tagTrusted(trustedRef, tagged); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-func selectKey(keys map[string]string) string {
-	if len(keys) == 0 {
-		return ""
-	}
-
-	keyIDs := []string{}
-	for k := range keys {
-		keyIDs = append(keyIDs, k)
-	}
-
-	// TODO(dmcgowan): let user choose if multiple keys, now pick consistently
-	sort.Strings(keyIDs)
-
-	return keyIDs[0]
-}
-
-func targetStream(in io.Writer) (io.WriteCloser, <-chan []target) {
-	r, w := io.Pipe()
-	out := io.MultiWriter(in, w)
-	targetChan := make(chan []target)
-
-	go func() {
-		targets := []target{}
-		scanner := bufio.NewScanner(r)
-		scanner.Split(ansiescape.ScanANSILines)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if matches := targetRegexp.FindSubmatch(line); len(matches) == 4 {
-				dgst, err := digest.ParseDigest(string(matches[2]))
-				if err != nil {
-					// Line does match what is expected, continue looking for valid lines
-					logrus.Debugf("Bad digest value %q in matched line, ignoring\n", string(matches[2]))
-					continue
-				}
-				s, err := strconv.ParseInt(string(matches[3]), 10, 64)
-				if err != nil {
-					// Line does match what is expected, continue looking for valid lines
-					logrus.Debugf("Bad size value %q in matched line, ignoring\n", string(matches[3]))
-					continue
-				}
-
-				targets = append(targets, target{
-					reference: registry.ParseReference(string(matches[1])),
-					digest:    dgst,
-					size:      s,
-				})
-			}
-		}
-		targetChan <- targets
-	}()
-
-	return ioutils.NewWriteCloserWrapper(out, w.Close), targetChan
-}
-
-func (cli *DockerCli) trustedPush(repoInfo *registry.RepositoryInfo, tag string, authConfig cliconfig.AuthConfig) error {
-	streamOut, targetChan := targetStream(cli.out)
-
-	v := url.Values{}
-	v.Set("tag", tag)
-
-	_, _, err := cli.clientRequestAttemptLogin("POST", "/images/"+repoInfo.LocalName+"/push?"+v.Encode(), nil, streamOut, repoInfo.Index, "push")
-	// Close stream channel to finish target parsing
-	if err := streamOut.Close(); err != nil {
-		return err
-	}
-	// Check error from request
+func (cli *DockerCli) trustedPush(repoInfo *registry.RepositoryInfo, tag string, authConfig types.AuthConfig, requestPrivilege apiclient.RequestPrivilegeFunc) error {
+	responseBody, err := cli.imagePushPrivileged(authConfig, repoInfo.Name(), tag, requestPrivilege)
 	if err != nil {
 		return err
 	}
 
-	// Get target results
-	targets := <-targetChan
+	defer responseBody.Close()
+
+	targets := []target{}
+	handleTarget := func(aux *json.RawMessage) {
+		var pushResult distribution.PushResult
+		err := json.Unmarshal(*aux, &pushResult)
+		if err == nil && pushResult.Tag != "" && pushResult.Digest.Validate() == nil {
+			targets = append(targets, target{
+				reference: registry.ParseReference(pushResult.Tag),
+				digest:    pushResult.Digest,
+				size:      int64(pushResult.Size),
+			})
+		}
+	}
+
+	err = jsonmessage.DisplayJSONMessagesStream(responseBody, cli.out, cli.outFd, cli.isTerminalOut, handleTarget)
+	if err != nil {
+		return err
+	}
 
 	if tag == "" {
 		fmt.Fprintf(cli.out, "No tag specified, skipping trust metadata push\n")
@@ -426,7 +404,7 @@ func (cli *DockerCli) trustedPush(repoInfo *registry.RepositoryInfo, tag string,
 
 	fmt.Fprintf(cli.out, "Signing and pushing trust metadata\n")
 
-	repo, err := cli.getNotaryRepository(repoInfo, authConfig)
+	repo, err := cli.getNotaryRepository(repoInfo, authConfig, "push", "pull")
 	if err != nil {
 		fmt.Fprintf(cli.out, "Error establishing connection to notary repository: %s\n", err)
 		return err
@@ -444,36 +422,35 @@ func (cli *DockerCli) trustedPush(repoInfo *registry.RepositoryInfo, tag string,
 			},
 			Length: int64(target.size),
 		}
-		if err := repo.AddTarget(t); err != nil {
+		if err := repo.AddTarget(t, releasesRole); err != nil {
 			return err
 		}
 	}
 
 	err = repo.Publish()
-	if _, ok := err.(*client.ErrRepoNotInitialized); !ok {
-		return notaryError(err)
+	if _, ok := err.(client.ErrRepoNotInitialized); !ok {
+		return notaryError(repoInfo.FullName(), err)
 	}
 
-	ks := repo.KeyStoreManager
-	keys := ks.RootKeyStore().ListKeys()
+	keys := repo.CryptoService.ListKeys(data.CanonicalRootRole)
 
-	rootKey := selectKey(keys)
-	if rootKey == "" {
-		rootKey, err = ks.GenRootKey("ecdsa")
+	var rootKeyID string
+	// always select the first root key
+	if len(keys) > 0 {
+		sort.Strings(keys)
+		rootKeyID = keys[0]
+	} else {
+		rootPublicKey, err := repo.CryptoService.Create(data.CanonicalRootRole, data.ECDSAKey)
 		if err != nil {
 			return err
 		}
+		rootKeyID = rootPublicKey.ID()
 	}
 
-	cryptoService, err := ks.GetRootCryptoService(rootKey)
-	if err != nil {
-		return err
+	if err := repo.Initialize(rootKeyID); err != nil {
+		return notaryError(repoInfo.FullName(), err)
 	}
+	fmt.Fprintf(cli.out, "Finished initializing %q\n", repoInfo.FullName())
 
-	if err := repo.Initialize(cryptoService); err != nil {
-		return notaryError(err)
-	}
-	fmt.Fprintf(cli.out, "Finished initializing %q\n", repoInfo.CanonicalName)
-
-	return notaryError(repo.Publish())
+	return notaryError(repoInfo.FullName(), repo.Publish())
 }

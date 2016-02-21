@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/docker/docker/pkg/integration/checker"
 	"github.com/go-check/check"
@@ -18,9 +19,8 @@ func (s *DockerSuite) TestSaveAndLoadRepoStdout(c *check.C) {
 	dockerCmd(c, "run", "--name", name, "busybox", "true")
 
 	repoName := "foobar-save-load-test"
-	out, _ := dockerCmd(c, "commit", name, repoName)
-
-	before, _ := dockerCmd(c, "inspect", repoName)
+	before, _ := dockerCmd(c, "commit", name, repoName)
+	before = strings.TrimRight(before, "\n")
 
 	tmpFile, err := ioutil.TempFile("", "foobar-save-load-test.tar")
 	c.Assert(err, check.IsNil)
@@ -40,12 +40,13 @@ func (s *DockerSuite) TestSaveAndLoadRepoStdout(c *check.C) {
 	loadCmd := exec.Command(dockerBinary, "load")
 	loadCmd.Stdin = tmpFile
 
-	out, _, err = runCommandWithOutput(loadCmd)
+	out, _, err := runCommandWithOutput(loadCmd)
 	c.Assert(err, check.IsNil, check.Commentf(out))
 
-	after, _ := dockerCmd(c, "inspect", repoName)
+	after := inspectField(c, repoName, "Id")
+	after = strings.TrimRight(after, "\n")
 
-	c.Assert(before, check.Equals, after) //inspect is not the same after a save / load
+	c.Assert(after, check.Equals, before) //inspect is not the same after a save / load
 
 	deleteImages(repoName)
 

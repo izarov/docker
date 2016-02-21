@@ -13,6 +13,7 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution/registry/api/v2"
 	"github.com/docker/distribution/registry/client/transport"
+	registrytypes "github.com/docker/engine-api/types/registry"
 )
 
 // for mocking in unit tests
@@ -44,15 +45,17 @@ func scanForAPIVersion(address string) (string, APIVersion) {
 
 // NewEndpoint parses the given address to return a registry endpoint.  v can be used to
 // specify a specific endpoint version
-func NewEndpoint(index *IndexInfo, metaHeaders http.Header, v APIVersion) (*Endpoint, error) {
+func NewEndpoint(index *registrytypes.IndexInfo, userAgent string, metaHeaders http.Header, v APIVersion) (*Endpoint, error) {
 	tlsConfig, err := newTLSConfig(index.Name, index.Secure)
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := newEndpoint(index.GetAuthConfigKey(), tlsConfig, metaHeaders)
+
+	endpoint, err := newEndpointFromStr(GetAuthConfigKey(index), tlsConfig, userAgent, metaHeaders)
 	if err != nil {
 		return nil, err
 	}
+
 	if v != APIVersionUnknown {
 		endpoint.Version = v
 	}
@@ -90,28 +93,39 @@ func validateEndpoint(endpoint *Endpoint) error {
 	return nil
 }
 
-func newEndpoint(address string, tlsConfig *tls.Config, metaHeaders http.Header) (*Endpoint, error) {
-	var (
-		endpoint       = new(Endpoint)
-		trimmedAddress string
-		err            error
-	)
-
-	if !strings.HasPrefix(address, "http") {
-		address = "https://" + address
+func newEndpoint(address url.URL, tlsConfig *tls.Config, userAgent string, metaHeaders http.Header) (*Endpoint, error) {
+	endpoint := &Endpoint{
+		IsSecure: (tlsConfig == nil || !tlsConfig.InsecureSkipVerify),
+		URL:      new(url.URL),
+		Version:  APIVersionUnknown,
 	}
 
-	endpoint.IsSecure = (tlsConfig == nil || !tlsConfig.InsecureSkipVerify)
-
-	trimmedAddress, endpoint.Version = scanForAPIVersion(address)
-
-	if endpoint.URL, err = url.Parse(trimmedAddress); err != nil {
-		return nil, err
-	}
+	*endpoint.URL = address
 
 	// TODO(tiborvass): make sure a ConnectTimeout transport is used
 	tr := NewTransport(tlsConfig)
-	endpoint.client = HTTPClient(transport.NewTransport(tr, DockerHeaders(metaHeaders)...))
+	endpoint.client = HTTPClient(transport.NewTransport(tr, DockerHeaders(userAgent, metaHeaders)...))
+	return endpoint, nil
+}
+
+func newEndpointFromStr(address string, tlsConfig *tls.Config, userAgent string, metaHeaders http.Header) (*Endpoint, error) {
+	if !strings.HasPrefix(address, "http://") && !strings.HasPrefix(address, "https://") {
+		address = "https://" + address
+	}
+
+	trimmedAddress, detectedVersion := scanForAPIVersion(address)
+
+	uri, err := url.Parse(trimmedAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint, err := newEndpoint(*uri, tlsConfig, userAgent, metaHeaders)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint.Version = detectedVersion
 	return endpoint, nil
 }
 
@@ -125,7 +139,7 @@ type Endpoint struct {
 	URLBuilder     *v2.URLBuilder
 }
 
-// Get the formated URL for the root of this registry Endpoint
+// Get the formatted URL for the root of this registry Endpoint
 func (e *Endpoint) String() string {
 	return fmt.Sprintf("%s/v%d/", e.URL, e.Version)
 }

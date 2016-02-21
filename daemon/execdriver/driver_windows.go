@@ -1,6 +1,6 @@
 package execdriver
 
-import "github.com/docker/docker/pkg/nat"
+import "github.com/docker/go-connections/nat"
 
 // Mount contains information for a mount operation.
 type Mount struct {
@@ -15,6 +15,15 @@ type Resources struct {
 	CommonResources
 
 	// Fields below here are platform specific
+}
+
+// ProcessConfig is the platform specific structure that describes a process
+// that will be run inside a container.
+type ProcessConfig struct {
+	CommonProcessConfig
+
+	// Fields below here are platform specific
+	ConsoleSize [2]int `json:"-"` // h,w of initial console size
 }
 
 // Network settings of the container
@@ -40,9 +49,17 @@ type Command struct {
 
 	// Fields below here are platform specific
 
-	FirstStart  bool     `json:"first_start"`  // Optimisation for first boot of Windows
+	FirstStart  bool     `json:"first_start"`  // Optimization for first boot of Windows
 	Hostname    string   `json:"hostname"`     // Windows sets the hostname in the execdriver
 	LayerFolder string   `json:"layer_folder"` // Layer folder for a command
 	LayerPaths  []string `json:"layer_paths"`  // Layer paths for a command
-	Isolated    bool     `json:"isolated"`     // True if a Hyper-V container
+	Isolation   string   `json:"isolation"`    // Isolation technology for the container
+	ArgsEscaped bool     `json:"args_escaped"` // True if args are already escaped
+	HvPartition bool     `json:"hv_partition"` // True if it's an hypervisor partition
+}
+
+// ExitStatus provides exit reasons for a container.
+type ExitStatus struct {
+	// The exit code with which the container exited.
+	ExitCode int
 }

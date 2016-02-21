@@ -5,17 +5,13 @@ import (
 	"net/http"
 	"path/filepath"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/pkg/integration/checker"
+	"github.com/docker/engine-api/types"
 	"github.com/go-check/check"
 )
 
 func (s *DockerSuite) TestVolumesApiList(c *check.C) {
-	prefix := ""
-	if daemonPlatform == "windows" {
-		prefix = "c:"
-		testRequires(c, WindowsDaemonSupportsVolumes)
-	}
+	prefix, _ := getPrefixAndSlashFromDaemonPlatform()
 	dockerCmd(c, "run", "-d", "-v", prefix+"/foo", "busybox")
 
 	status, b, err := sockRequest("GET", "/volumes", nil)
@@ -29,9 +25,6 @@ func (s *DockerSuite) TestVolumesApiList(c *check.C) {
 }
 
 func (s *DockerSuite) TestVolumesApiCreate(c *check.C) {
-	if daemonPlatform == "windows" {
-		testRequires(c, WindowsDaemonSupportsVolumes)
-	}
 	config := types.VolumeCreateRequest{
 		Name: "test",
 	}
@@ -47,11 +40,7 @@ func (s *DockerSuite) TestVolumesApiCreate(c *check.C) {
 }
 
 func (s *DockerSuite) TestVolumesApiRemove(c *check.C) {
-	prefix := ""
-	if daemonPlatform == "windows" {
-		testRequires(c, WindowsDaemonSupportsVolumes)
-		prefix = "c:"
-	}
+	prefix, _ := getPrefixAndSlashFromDaemonPlatform()
 	dockerCmd(c, "run", "-d", "-v", prefix+"/foo", "--name=test", "busybox")
 
 	status, b, err := sockRequest("GET", "/volumes", nil)
@@ -75,9 +64,6 @@ func (s *DockerSuite) TestVolumesApiRemove(c *check.C) {
 }
 
 func (s *DockerSuite) TestVolumesApiInspect(c *check.C) {
-	if daemonPlatform == "windows" {
-		testRequires(c, WindowsDaemonSupportsVolumes)
-	}
 	config := types.VolumeCreateRequest{
 		Name: "test",
 	}

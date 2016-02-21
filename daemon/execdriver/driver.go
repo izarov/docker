@@ -39,26 +39,11 @@ type Hooks struct {
 	PostStop []DriverCallback
 }
 
-// Info is driver specific information based on
-// processes registered with the driver
-type Info interface {
-	IsRunning() bool
-}
-
 // Terminal represents a pseudo TTY, it is for when
 // using a container interactively.
 type Terminal interface {
 	io.Closer
 	Resize(height, width int) error
-}
-
-// ExitStatus provides exit reasons for a container.
-type ExitStatus struct {
-	// The exit code with which the container exited.
-	ExitCode int
-
-	// Whether the container encountered an OOM.
-	OOMKilled bool
 }
 
 // Driver is an interface for drivers to implement
@@ -84,10 +69,6 @@ type Driver interface {
 	// Name returns the name of the driver.
 	Name() string
 
-	// Info returns the configuration stored in the driver struct,
-	// "temporary" hack (until we move state from core to plugins).
-	Info(id string) Info
-
 	// GetPidsForContainer returns a list of pid for the processes running in a container.
 	GetPidsForContainer(id string) ([]int, error)
 
@@ -99,6 +80,9 @@ type Driver interface {
 
 	// Stats returns resource stats for a running container
 	Stats(id string) (*ResourceStats, error)
+
+	// Update updates resource configs for a container
+	Update(c *Command) error
 
 	// SupportsHooks refers to the driver capability to exploit pre/post hook functionality
 	SupportsHooks() bool
@@ -121,18 +105,15 @@ type ResourceStats struct {
 	SystemUsage uint64    `json:"system_usage"`
 }
 
-// ProcessConfig describes a process that will be run inside a container.
-type ProcessConfig struct {
+// CommonProcessConfig is the common platform agnostic part of the ProcessConfig
+// structure that describes a process that will be run inside a container.
+type CommonProcessConfig struct {
 	exec.Cmd `json:"-"`
 
-	Privileged  bool     `json:"privileged"`
-	User        string   `json:"user"`
-	Tty         bool     `json:"tty"`
-	Entrypoint  string   `json:"entrypoint"`
-	Arguments   []string `json:"arguments"`
-	Terminal    Terminal `json:"-"` // standard or tty terminal (Unix)
-	Console     string   `json:"-"` // dev/console path (Unix)
-	ConsoleSize [2]int   `json:"-"` // h,w of initial console size (Windows)
+	Tty        bool     `json:"tty"`
+	Entrypoint string   `json:"entrypoint"`
+	Arguments  []string `json:"arguments"`
+	Terminal   Terminal `json:"-"` // standard or tty terminal
 }
 
 // CommonCommand is the common platform agnostic part of the Command structure
@@ -140,7 +121,6 @@ type ProcessConfig struct {
 type CommonCommand struct {
 	ContainerPid  int           `json:"container_pid"` // the pid for the process inside a container
 	ID            string        `json:"id"`
-	InitPath      string        `json:"initpath"`    // dockerinit
 	MountLabel    string        `json:"mount_label"` // TODO Windows. More involved, but can be factored out
 	Mounts        []Mount       `json:"mounts"`
 	Network       *Network      `json:"network"`
@@ -149,4 +129,5 @@ type CommonCommand struct {
 	Resources     *Resources    `json:"resources"`
 	Rootfs        string        `json:"rootfs"` // root fs of the container
 	WorkingDir    string        `json:"working_dir"`
+	TmpDir        string        `json:"tmpdir"` // Directory used to store docker tmpdirs.
 }

@@ -4,7 +4,7 @@ title = "Remote API v1.21"
 description = "API Documentation for Docker"
 keywords = ["API, Docker, rcli, REST,  documentation"]
 [menu.main]
-parent="smn_remoteapi"
+parent="engine_remoteapi"
 weight=-2
 +++
 <![end-metadata]-->
@@ -15,7 +15,7 @@ weight=-2
 
  - The Remote API has replaced `rcli`.
  - The daemon listens on `unix:///var/run/docker.sock` but you can
-   [Bind Docker to another host/port or a Unix socket](../../articles/basics.md#bind-docker-to-another-hostport-or-a-unix-socket).
+   [Bind Docker to another host/port or a Unix socket](../../quickstart.md#bind-docker-to-another-host-port-or-a-unix-socket).
  - The API tends to be REST. However, for some complex commands, like `attach`
    or `pull`, the HTTP connection is hijacked to transport `stdout`,
    `stdin` and `stderr`.
@@ -200,6 +200,7 @@ Create a container
              "VolumesFrom": ["parent", "other:ro"],
              "CapAdd": ["NET_ADMIN"],
              "CapDrop": ["MKNOD"],
+             "GroupAdd": ["newgroup"],
              "RestartPolicy": { "Name": "", "MaximumRetryCount": 0 },
              "NetworkMode": "bridge",
              "Devices": [],
@@ -229,7 +230,7 @@ Json Parameters:
       for the container.
 -   **User** - A string value specifying the user inside the container.
 -   **Memory** - Memory limit in bytes.
--   **MemorySwap** - Total memory limit (memory + swap); set `-1` to disable swap
+-   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
       You must use this with `memory` and make the swap value larger than `memory`.
 -   **MemoryReservation** - Memory soft limit in bytes.
 -   **KernelMemory** - Kernel memory limit in bytes.
@@ -293,6 +294,7 @@ Json Parameters:
           Specified in the form `<container name>[:<ro|rw>]`
     -   **CapAdd** - A list of kernel capabilities to add to the container.
     -   **Capdrop** - A list of kernel capabilities to drop from the container.
+    -   **GroupAdd** - A list of additional groups that the container process will run as
     -   **RestartPolicy** – The behavior to apply when the container exits.  The
             value is an object with a `Name` property of either `"always"` to
             always restart, `"unless-stopped"` to restart always except when
@@ -303,7 +305,8 @@ Json Parameters:
             An ever increasing delay (double the previous delay, starting at 100mS)
             is added before each restart to prevent flooding the server.
     -   **NetworkMode** - Sets the networking mode for the container. Supported
-          values are: `bridge`, `host`, and `container:<name|id>`
+          standard values are: `bridge`, `host`, `none`, and `container:<name|id>`. Any other value is taken
+          as a custom network's name to which this container should connect to.
     -   **Devices** - A list of devices to add to the container specified as a JSON object in the
       form
           `{ "PathOnHost": "/dev/deviceName", "PathInContainer": "/dev/deviceName", "CgroupPermissions": "mrw"}`
@@ -333,7 +336,7 @@ Status Codes:
 
 ### Inspect a container
 
-`GET /containers/(id)/json`
+`GET /containers/(id or name)/json`
 
 Return low-level information on the container `id`
 
@@ -523,9 +526,11 @@ Status Codes:
 
 ### List processes running inside a container
 
-`GET /containers/(id)/top`
+`GET /containers/(id or name)/top`
 
-List processes running inside the container `id`
+List processes running inside the container `id`. On Unix systems this
+is done by running the `ps` command. This endpoint is not
+supported on Windows.
 
 **Example request**:
 
@@ -537,28 +542,45 @@ List processes running inside the container `id`
     Content-Type: application/json
 
     {
-         "Titles": [
-                 "USER",
-                 "PID",
-                 "%CPU",
-                 "%MEM",
-                 "VSZ",
-                 "RSS",
-                 "TTY",
-                 "STAT",
-                 "START",
-                 "TIME",
-                 "COMMAND"
-                 ],
-         "Processes": [
-                 ["root","20147","0.0","0.1","18060","1864","pts/4","S","10:06","0:00","bash"],
-                 ["root","20271","0.0","0.0","4312","352","pts/4","S+","10:07","0:00","sleep","10"]
+       "Titles" : [
+         "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"
+       ],
+       "Processes" : [
+         [
+           "root", "13642", "882", "0", "17:03", "pts/0", "00:00:00", "/bin/bash"
+         ],
+         [
+           "root", "13735", "13642", "0", "17:06", "pts/0", "00:00:00", "sleep 10"
          ]
+       ]
+    }
+
+**Example request**:
+
+    GET /containers/4fa6e0f0c678/top?ps_args=aux HTTP/1.1
+
+**Example response**:
+
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+
+    {
+      "Titles" : [
+        "USER","PID","%CPU","%MEM","VSZ","RSS","TTY","STAT","START","TIME","COMMAND"
+      ]
+      "Processes" : [
+        [
+          "root","13642","0.0","0.1","18172","3184","pts/0","Ss","17:03","0:00","/bin/bash"
+        ],
+        [
+          "root","13895","0.0","0.0","4348","692","pts/0","S+","17:15","0:00","sleep 10"
+        ]
+      ],
     }
 
 Query Parameters:
 
--   **ps_args** – ps arguments to use (e.g., aux)
+-   **ps_args** – `ps` arguments to use (e.g., `aux`), defaults to `-ef`
 
 Status Codes:
 
@@ -568,7 +590,7 @@ Status Codes:
 
 ### Get container logs
 
-`GET /containers/(id)/logs`
+`GET /containers/(id or name)/logs`
 
 Get `stdout` and `stderr` logs from the container ``id``
 
@@ -608,7 +630,7 @@ Status Codes:
 
 ### Inspect changes on a container's filesystem
 
-`GET /containers/(id)/changes`
+`GET /containers/(id or name)/changes`
 
 Inspect changes on container `id`'s filesystem
 
@@ -650,7 +672,7 @@ Status Codes:
 
 ### Export a container
 
-`GET /containers/(id)/export`
+`GET /containers/(id or name)/export`
 
 Export the contents of container `id`
 
@@ -673,11 +695,9 @@ Status Codes:
 
 ### Get container stats based on resource usage
 
-`GET /containers/(id)/stats`
+`GET /containers/(id or name)/stats`
 
 This endpoint returns a live stream of a container's resource usage statistics.
-
-> **Note**: this functionality currently only works when using the *libcontainer* exec-driver.
 
 **Example request**:
 
@@ -779,7 +799,7 @@ Status Codes:
 
 ### Resize a container TTY
 
-`POST /containers/(id)/resize`
+`POST /containers/(id or name)/resize`
 
 Resize the TTY for container with  `id`. The unit is number of characters. You must restart the container for the resize to take effect.
 
@@ -806,7 +826,7 @@ Status Codes:
 
 ### Start a container
 
-`POST /containers/(id)/start`
+`POST /containers/(id or name)/start`
 
 Start the container `id`
 
@@ -816,7 +836,7 @@ Start the container `id`
 
 **Example request**:
 
-    POST /containers/(id)/start HTTP/1.1
+    POST /containers/(id or name)/start HTTP/1.1
 
 **Example response**:
 
@@ -831,7 +851,7 @@ Status Codes:
 
 ### Stop a container
 
-`POST /containers/(id)/stop`
+`POST /containers/(id or name)/stop`
 
 Stop the container `id`
 
@@ -856,7 +876,7 @@ Status Codes:
 
 ### Restart a container
 
-`POST /containers/(id)/restart`
+`POST /containers/(id or name)/restart`
 
 Restart the container `id`
 
@@ -880,7 +900,7 @@ Status Codes:
 
 ### Kill a container
 
-`POST /containers/(id)/kill`
+`POST /containers/(id or name)/kill`
 
 Kill the container `id`
 
@@ -905,7 +925,7 @@ Status Codes:
 
 ### Rename a container
 
-`POST /containers/(id)/rename`
+`POST /containers/(id or name)/rename`
 
 Rename the container `id` to a `new_name`
 
@@ -930,7 +950,7 @@ Status Codes:
 
 ### Pause a container
 
-`POST /containers/(id)/pause`
+`POST /containers/(id or name)/pause`
 
 Pause the container `id`
 
@@ -950,7 +970,7 @@ Status Codes:
 
 ### Unpause a container
 
-`POST /containers/(id)/unpause`
+`POST /containers/(id or name)/unpause`
 
 Unpause the container `id`
 
@@ -970,7 +990,7 @@ Status Codes:
 
 ### Attach to a container
 
-`POST /containers/(id)/attach`
+`POST /containers/(id or name)/attach`
 
 Attach to the container `id`
 
@@ -1053,7 +1073,7 @@ Status Codes:
 
 ### Attach to a container (websocket)
 
-`GET /containers/(id)/attach/ws`
+`GET /containers/(id or name)/attach/ws`
 
 Attach to the container `id` via websocket
 
@@ -1088,7 +1108,7 @@ Status Codes:
 
 ### Wait a container
 
-`POST /containers/(id)/wait`
+`POST /containers/(id or name)/wait`
 
 Block until container `id` stops, then returns the exit code
 
@@ -1111,7 +1131,7 @@ Status Codes:
 
 ### Remove a container
 
-`DELETE /containers/(id)`
+`DELETE /containers/(id or name)`
 
 Remove the container `id` from the filesystem
 
@@ -1139,7 +1159,7 @@ Status Codes:
 
 ### Copy files or folders from a container
 
-`POST /containers/(id)/copy`
+`POST /containers/(id or name)/copy`
 
 Copy files or folders of container `id`
 
@@ -1169,14 +1189,14 @@ Status Codes:
 
 ### Retrieving information about files and folders in a container
 
-`HEAD /containers/(id)/archive`
+`HEAD /containers/(id or name)/archive`
 
 See the description of the `X-Docker-Container-Path-Stat` header in the
 following section.
 
 ### Get an archive of a filesystem resource in a container
 
-`GET /containers/(id)/archive`
+`GET /containers/(id or name)/archive`
 
 Get an tar archive of a resource in the filesystem of container `id`.
 
@@ -1237,7 +1257,7 @@ Status Codes:
 
 ### Extract an archive of files or folders to a directory in a container
 
-`PUT /containers/(id)/archive`
+`PUT /containers/(id or name)/archive`
 
 Upload a tar archive to be extracted to a path in the filesystem of container
 `id`.
@@ -1426,7 +1446,7 @@ Query Parameters:
 -   **rm** - Remove intermediate containers after a successful build (default behavior).
 -   **forcerm** - Always remove intermediate containers (includes `rm`).
 -   **memory** - Set memory limit for build.
--   **memswap** - Total memory (memory + swap), `-1` to disable swap.
+-   **memswap** - Total memory (memory + swap), `-1` to enable unlimited swap.
 -   **cpushares** - CPU shares (relative weight).
 -   **cpusetcpus** - CPUs in which to allow execution (e.g., `0-3`, `0,1`).
 -   **cpuperiod** - The length of a CPU period in microseconds.
@@ -2212,7 +2232,7 @@ the root that contains a list of repository and tag names mapped to layer IDs.
 
 ### Exec Create
 
-`POST /containers/(id)/exec`
+`POST /containers/(id or name)/exec`
 
 Sets up an exec instance in a running container `id`
 
@@ -2254,6 +2274,8 @@ Status Codes:
 
 -   **201** – no error
 -   **404** – no such container
+-   **409** - container is paused
+-   **500** - server error
 
 ### Exec Start
 
@@ -2289,7 +2311,7 @@ Status Codes:
 
 -   **200** – no error
 -   **404** – no such exec instance
--   **409** - container is stopped or paused
+-   **409** - container is paused
 
     **Stream details**:
     Similar to the stream behavior of `POST /container/(id)/attach` API
@@ -2554,7 +2576,7 @@ Instruct the driver to remove the volume (`name`).
 
 **Example request**:
 
-    DELETE /volumes/local/tardis HTTP/1.1
+    DELETE /volumes/tardis HTTP/1.1
 
 **Example response**:
 
@@ -2742,13 +2764,13 @@ Content-Type: application/json
 Status Codes:
 
 - **201** - no error
-- **404** - driver not found
+- **404** - plugin not found
 - **500** - server error
 
 JSON Parameters:
 
 - **Name** - The new network's name. this is a mandatory field
-- **Driver** - Name of the network driver to use. Defaults to `bridge` driver
+- **Driver** - Name of the network driver plugin to use. Defaults to `bridge` driver
 - **IPAM** - Optional custom IP scheme for the network
 - **Options** - Network specific options to be used by the drivers
 - **CheckDuplicate** - Requests daemon to check for networks with same name
@@ -2776,8 +2798,9 @@ Content-Type: application/json
 
 Status Codes:
 
-- **201** - no error
+- **200** - no error
 - **404** - network or container is not found
+- **500** - Internal Server Error
 
 JSON Parameters:
 
@@ -2806,8 +2829,9 @@ Content-Type: application/json
 
 Status Codes:
 
-- **201** - no error
+- **200** - no error
 - **404** - network or container not found
+- **500** - Internal Server Error
 
 JSON Parameters:
 
@@ -2825,11 +2849,11 @@ Instruct the driver to remove the network (`id`).
 
 **Example response**:
 
-    HTTP/1.1 204 No Content
+    HTTP/1.1 200 OK
 
 Status Codes
 
--   **204** - no error
+-   **200** - no error
 -   **404** - no such network
 -   **500** - server error
 

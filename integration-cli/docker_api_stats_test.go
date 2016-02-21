@@ -10,10 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/pkg/integration/checker"
+	"github.com/docker/docker/pkg/version"
+	"github.com/docker/engine-api/types"
 	"github.com/go-check/check"
 )
+
+var expectedNetworkInterfaceStats = strings.Split("rx_bytes rx_dropped rx_errors rx_packets tx_bytes tx_dropped tx_errors tx_packets", " ")
 
 func (s *DockerSuite) TestApiStatsNoStreamGetCpu(c *check.C) {
 	testRequires(c, DaemonIsLinux)
@@ -24,7 +27,7 @@ func (s *DockerSuite) TestApiStatsNoStreamGetCpu(c *check.C) {
 
 	resp, body, err := sockRequestRaw("GET", fmt.Sprintf("/containers/%s/stats?stream=false", id), nil, "")
 	c.Assert(err, checker.IsNil)
-	c.Assert(resp.ContentLength, checker.GreaterThan, int64(0), check.Commentf("should not use chunked encoding"))
+	c.Assert(resp.StatusCode, checker.Equals, http.StatusOK)
 	c.Assert(resp.Header.Get("Content-Type"), checker.Equals, "application/json")
 
 	var v *types.Stats
@@ -79,14 +82,14 @@ func (s *DockerSuite) TestApiStatsStoppedContainerInGoroutines(c *check.C) {
 func (s *DockerSuite) TestApiStatsNetworkStats(c *check.C) {
 	testRequires(c, SameHostDaemon)
 	testRequires(c, DaemonIsLinux)
-	// Run container for 30 secs
-	out, _ := dockerCmd(c, "run", "-d", "busybox", "top")
+
+	out, _ := runSleepingContainer(c)
 	id := strings.TrimSpace(out)
 	c.Assert(waitRun(id), checker.IsNil)
 
 	// Retrieve the container address
 	contIP := findContainerIP(c, id, "bridge")
-	numPings := 10
+	numPings := 4
 
 	var preRxPackets uint64
 	var preTxPackets uint64
@@ -122,6 +125,27 @@ func (s *DockerSuite) TestApiStatsNetworkStats(c *check.C) {
 		check.Commentf("Reported less Txbytes than expected. Expected >= %d. Found %d. %s", expRxPkts, postRxPackets, pingouts))
 }
 
+func (s *DockerSuite) TestApiStatsNetworkStatsVersioning(c *check.C) {
+	testRequires(c, SameHostDaemon)
+	testRequires(c, DaemonIsLinux)
+
+	out, _ := runSleepingContainer(c)
+	id := strings.TrimSpace(out)
+	c.Assert(waitRun(id), checker.IsNil)
+
+	for i := 17; i <= 21; i++ {
+		apiVersion := fmt.Sprintf("v1.%d", i)
+		statsJSONBlob := getVersionedStats(c, id, apiVersion)
+		if version.Version(apiVersion).LessThan("v1.21") {
+			c.Assert(jsonBlobHasLTv121NetworkStats(statsJSONBlob), checker.Equals, true,
+				check.Commentf("Stats JSON blob from API %s %#v does not look like a <v1.21 API stats structure", apiVersion, statsJSONBlob))
+		} else {
+			c.Assert(jsonBlobHasGTE121NetworkStats(statsJSONBlob), checker.Equals, true,
+				check.Commentf("Stats JSON blob from API %s %#v does not look like a >=v1.21 API stats structure", apiVersion, statsJSONBlob))
+		}
+	}
+}
+
 func getNetworkStats(c *check.C, id string) map[string]types.NetworkStats {
 	var st *types.StatsJSON
 
@@ -133,6 +157,63 @@ func getNetworkStats(c *check.C, id string) map[string]types.NetworkStats {
 	body.Close()
 
 	return st.Networks
+}
+
+// getVersionedStats returns stats result for the
+// container with id using an API call with version apiVersion. Since the
+// stats result type differs between API versions, we simply return
+// map[string]interface{}.
+func getVersionedStats(c *check.C, id string, apiVersion string) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	_, body, err := sockRequestRaw("GET", fmt.Sprintf("/%s/containers/%s/stats?stream=false", apiVersion, id), nil, "")
+	c.Assert(err, checker.IsNil)
+	defer body.Close()
+
+	err = json.NewDecoder(body).Decode(&stats)
+	c.Assert(err, checker.IsNil, check.Commentf("failed to decode stat: %s", err))
+
+	return stats
+}
+
+func jsonBlobHasLTv121NetworkStats(blob map[string]interface{}) bool {
+	networkStatsIntfc, ok := blob["network"]
+	if !ok {
+		return false
+	}
+	networkStats, ok := networkStatsIntfc.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, expectedKey := range expectedNetworkInterfaceStats {
+		if _, ok := networkStats[expectedKey]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func jsonBlobHasGTE121NetworkStats(blob map[string]interface{}) bool {
+	networksStatsIntfc, ok := blob["networks"]
+	if !ok {
+		return false
+	}
+	networksStats, ok := networksStatsIntfc.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, networkInterfaceStatsIntfc := range networksStats {
+		networkInterfaceStats, ok := networkInterfaceStatsIntfc.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for _, expectedKey := range expectedNetworkInterfaceStats {
+			if _, ok := networkInterfaceStats[expectedKey]; !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *DockerSuite) TestApiStatsContainerNotFound(c *check.C) {

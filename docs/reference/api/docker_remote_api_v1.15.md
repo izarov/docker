@@ -4,7 +4,7 @@ title = "Remote API v1.15"
 description = "API Documentation for Docker"
 keywords = ["API, Docker, rcli, REST,  documentation"]
 [menu.main]
-parent = "smn_remoteapi"
+parent = "engine_remoteapi"
 weight = 6
 +++
 <![end-metadata]-->
@@ -15,7 +15,7 @@ weight = 6
 
  - The Remote API has replaced `rcli`.
  - The daemon listens on `unix:///var/run/docker.sock` but you can
-   [Bind Docker to another host/port or a Unix socket](../../articles/basics.md#bind-docker-to-another-hostport-or-a-unix-socket).
+   [Bind Docker to another host/port or a Unix socket](../../quickstart.md#bind-docker-to-another-host-port-or-a-unix-socket).
  - The API tends to be REST, but for some complex commands, like `attach`
    or `pull`, the HTTP connection is hijacked to transport `STDOUT`,
    `STDIN` and `STDERR`.
@@ -189,7 +189,7 @@ Json Parameters:
       for the container.
 -   **User** - A string value containing the user to use inside the container.
 -   **Memory** - Memory limit in bytes.
--   **MemorySwap**- Total memory usage (memory + swap); set `-1` to disable swap.
+-   **MemorySwap** - Total memory limit (memory + swap); set `-1` to enable unlimited swap.
 -   **CpuShares** - An integer value containing the CPU Shares for container
       (ie. the relative weight vs other containers).
     **CpuSet** - String value containing the cgroups Cpuset to use.
@@ -249,7 +249,7 @@ Json Parameters:
           An ever increasing delay (double the previous delay, starting at 100mS)
           is added before each restart to prevent flooding the server.
   -   **NetworkMode** - Sets the networking mode for the container. Supported
-        values are: `bridge`, `host`, and `container:<name|id>`
+        values are: `bridge`, `host`, `none`, and `container:<name|id>`
   -   **Devices** - A list of devices to add to the container specified in the
         form
         `{ "PathOnHost": "/dev/deviceName", "PathInContainer": "/dev/deviceName", "CgroupPermissions": "mrw"}`
@@ -268,7 +268,7 @@ Status Codes:
 
 ### Inspect a container
 
-`GET /containers/(id)/json`
+`GET /containers/(id or name)/json`
 
 Return low-level information on the container `id`
 
@@ -355,42 +355,61 @@ Status Codes:
 
 ### List processes running inside a container
 
-`GET /containers/(id)/top`
+`GET /containers/(id or name)/top`
 
-List processes running inside the container `id`
+List processes running inside the container `id`. On Unix systems this
+is done by running the `ps` command. This endpoint is not
+supported on Windows.
 
 **Example request**:
 
-        GET /containers/4fa6e0f0c678/top HTTP/1.1
+    GET /containers/4fa6e0f0c678/top HTTP/1.1
 
 **Example response**:
 
-        HTTP/1.1 200 OK
-        Content-Type: application/json
+    HTTP/1.1 200 OK
+    Content-Type: application/json
 
-        {
-             "Titles": [
-                     "USER",
-                     "PID",
-                     "%CPU",
-                     "%MEM",
-                     "VSZ",
-                     "RSS",
-                     "TTY",
-                     "STAT",
-                     "START",
-                     "TIME",
-                     "COMMAND"
-                     ],
-             "Processes": [
-                     ["root","20147","0.0","0.1","18060","1864","pts/4","S","10:06","0:00","bash"],
-                     ["root","20271","0.0","0.0","4312","352","pts/4","S+","10:07","0:00","sleep","10"]
-             ]
-        }
+    {
+       "Titles" : [
+         "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"
+       ],
+       "Processes" : [
+         [
+           "root", "13642", "882", "0", "17:03", "pts/0", "00:00:00", "/bin/bash"
+         ],
+         [
+           "root", "13735", "13642", "0", "17:06", "pts/0", "00:00:00", "sleep 10"
+         ]
+       ]
+    }
+
+**Example request**:
+
+    GET /containers/4fa6e0f0c678/top?ps_args=aux HTTP/1.1
+
+**Example response**:
+
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+
+    {
+      "Titles" : [
+        "USER","PID","%CPU","%MEM","VSZ","RSS","TTY","STAT","START","TIME","COMMAND"
+      ]
+      "Processes" : [
+        [
+          "root","13642","0.0","0.1","18172","3184","pts/0","Ss","17:03","0:00","/bin/bash"
+        ],
+        [
+          "root","13895","0.0","0.0","4348","692","pts/0","S+","17:15","0:00","sleep 10"
+        ]
+      ],
+    }
 
 Query Parameters:
 
--   **ps_args** – ps arguments to use (e.g., aux)
+-   **ps_args** – `ps` arguments to use (e.g., `aux`), defaults to `-ef`
 
 Status Codes:
 
@@ -400,7 +419,7 @@ Status Codes:
 
 ### Get container logs
 
-`GET /containers/(id)/logs`
+`GET /containers/(id or name)/logs`
 
 Get stdout and stderr logs from the container ``id``
 
@@ -432,7 +451,7 @@ Status Codes:
 
 ### Inspect changes on a container's filesystem
 
-`GET /containers/(id)/changes`
+`GET /containers/(id or name)/changes`
 
 Inspect changes on container `id`'s filesystem
 
@@ -468,7 +487,7 @@ Status Codes:
 
 ### Export a container
 
-`GET /containers/(id)/export`
+`GET /containers/(id or name)/export`
 
 Export the contents of container `id`
 
@@ -491,7 +510,7 @@ Status Codes:
 
 ### Resize a container TTY
 
-`GET /containers/(id)/resize?h=<height>&w=<width>`
+`GET /containers/(id or name)/resize?h=<height>&w=<width>`
 
 Resize the TTY of container `id`
 
@@ -513,13 +532,13 @@ Status Codes:
 
 ### Start a container
 
-`POST /containers/(id)/start`
+`POST /containers/(id or name)/start`
 
 Start the container `id`
 
 **Example request**:
 
-        POST /containers/(id)/start HTTP/1.1
+        POST /containers/(id or name)/start HTTP/1.1
         Content-Type: application/json
 
         {
@@ -577,7 +596,7 @@ Json Parameters:
         An ever increasing delay (double the previous delay, starting at 100mS)
         is added before each restart to prevent flooding the server.
 -   **NetworkMode** - Sets the networking mode for the container. Supported
-      values are: `bridge`, `host`, and `container:<name|id>`
+      values are: `bridge`, `host`, `none`, and `container:<name|id>`
 -   **Devices** - A list of devices to add to the container specified in the
       form
       `{ "PathOnHost": "/dev/deviceName", "PathInContainer": "/dev/deviceName", "CgroupPermissions": "mrw"}`
@@ -591,7 +610,7 @@ Status Codes:
 
 ### Stop a container
 
-`POST /containers/(id)/stop`
+`POST /containers/(id or name)/stop`
 
 Stop the container `id`
 
@@ -616,7 +635,7 @@ Status Codes:
 
 ### Restart a container
 
-`POST /containers/(id)/restart`
+`POST /containers/(id or name)/restart`
 
 Restart the container `id`
 
@@ -640,7 +659,7 @@ Status Codes:
 
 ### Kill a container
 
-`POST /containers/(id)/kill`
+`POST /containers/(id or name)/kill`
 
 Kill the container `id`
 
@@ -665,7 +684,7 @@ Status Codes:
 
 ### Pause a container
 
-`POST /containers/(id)/pause`
+`POST /containers/(id or name)/pause`
 
 Pause the container `id`
 
@@ -685,7 +704,7 @@ Status Codes:
 
 ### Unpause a container
 
-`POST /containers/(id)/unpause`
+`POST /containers/(id or name)/unpause`
 
 Unpause the container `id`
 
@@ -705,7 +724,7 @@ Status Codes:
 
 ### Attach to a container
 
-`POST /containers/(id)/attach`
+`POST /containers/(id or name)/attach`
 
 Attach to the container `id`
 
@@ -784,7 +803,7 @@ Status Codes:
 
 ### Attach to a container (websocket)
 
-`GET /containers/(id)/attach/ws`
+`GET /containers/(id or name)/attach/ws`
 
 Attach to the container `id` via websocket
 
@@ -819,7 +838,7 @@ Status Codes:
 
 ### Wait a container
 
-`POST /containers/(id)/wait`
+`POST /containers/(id or name)/wait`
 
 Block until container `id` stops, then returns the exit code
 
@@ -842,7 +861,7 @@ Status Codes:
 
 ### Remove a container
 
-`DELETE /containers/(id)`
+`DELETE /containers/(id or name)`
 
 Remove the container `id` from the filesystem
 
@@ -870,7 +889,7 @@ Status Codes:
 
 ### Copy files or folders from a container
 
-`POST /containers/(id)/copy`
+`POST /containers/(id or name)/copy`
 
 Copy files or folders of container `id`
 
@@ -1604,7 +1623,7 @@ the root that contains a list of repository and tag names mapped to layer IDs.
 
 ### Exec Create
 
-`POST /containers/(id)/exec`
+`POST /containers/(id or name)/exec`
 
 Sets up an exec instance in a running container `id`
 

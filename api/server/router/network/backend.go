@@ -1,23 +1,21 @@
 package network
 
 import (
-	// TODO: network config needs to be refactored out to a
-	// different location
-	"github.com/docker/docker/daemon/network"
-
+	"github.com/docker/engine-api/types/network"
 	"github.com/docker/libnetwork"
 )
 
-// Backend is all the methods that need to be implemented to provide
-// network specific functionality
+// Backend is all the methods that need to be implemented
+// to provide network specific functionality.
 type Backend interface {
-	FindNetwork(idName string) (libnetwork.Network, error)
-	GetNetwork(idName string, by int) (libnetwork.Network, error)
-	GetNetworksByID(partialID string) []libnetwork.Network
-	CreateNetwork(name, driver string, ipam network.IPAM,
-		options map[string]string) (libnetwork.Network, error)
-	ConnectContainerToNetwork(containerName, networkName string) error
-	DisconnectContainerFromNetwork(containerName string,
-		network libnetwork.Network) error
 	NetworkControllerEnabled() bool
+
+	FindNetwork(idName string) (libnetwork.Network, error)
+	GetNetworkByName(idName string) (libnetwork.Network, error)
+	GetNetworksByID(partialID string) []libnetwork.Network
+	GetAllNetworks() []libnetwork.Network
+	CreateNetwork(name, driver string, ipam network.IPAM, options map[string]string, internal bool, enableIPv6 bool) (libnetwork.Network, error)
+	ConnectContainerToNetwork(containerName, networkName string, endpointConfig *network.EndpointSettings) error
+	DisconnectContainerFromNetwork(containerName string, network libnetwork.Network, force bool) error
+	DeleteNetwork(name string) error
 }

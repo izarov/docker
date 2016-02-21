@@ -4,7 +4,7 @@
 // parser package for more information) that are yielded from the parser itself.
 // Calling NewBuilder with the BuildOpts struct can be used to customize the
 // experience for execution purposes only. Parsing is controlled in the parser
-// package, and this division of resposibility should be respected.
+// package, and this division of responsibility should be respected.
 //
 // Please see the jump table targets for the actual invocations, most of which
 // will call out to the functions in internals.go to deal with their tasks.
@@ -29,17 +29,30 @@ import (
 )
 
 // Environment variable interpolation will happen on these statements only.
-var replaceEnvAllowed = map[string]struct{}{
-	command.Env:        {},
-	command.Label:      {},
-	command.Add:        {},
-	command.Copy:       {},
-	command.Workdir:    {},
-	command.Expose:     {},
-	command.Volume:     {},
-	command.User:       {},
-	command.StopSignal: {},
-	command.Arg:        {},
+var replaceEnvAllowed = map[string]bool{
+	command.Env:        true,
+	command.Label:      true,
+	command.Add:        true,
+	command.Copy:       true,
+	command.Workdir:    true,
+	command.Expose:     true,
+	command.Volume:     true,
+	command.User:       true,
+	command.StopSignal: true,
+	command.Arg:        true,
+}
+
+// Certain commands are allowed to have their args split into more
+// words after env var replacements. Meaning:
+//   ENV foo="123 456"
+//   EXPOSE $foo
+// should result in the same thing as:
+//   EXPOSE 123 456
+// and not treat "123 456" as a single word.
+// Note that: EXPOSE "$foo" and EXPOSE $foo are not the same thing.
+// Quotes will cause it to still be treated as single word.
+var allowWordExpansion = map[string]bool{
+	command.Expose: true,
 }
 
 var evaluateTable map[string]func(*Builder, []string, map[string]bool, string) error
@@ -92,7 +105,7 @@ func (b *Builder) dispatch(stepN int, ast *parser.Node) error {
 	attrs := ast.Attributes
 	original := ast.Original
 	flags := ast.Flags
-	strs := []string{}
+	strList := []string{}
 	msg := fmt.Sprintf("Step %d : %s", stepN+1, upperCasedCmd)
 
 	if len(ast.Flags) > 0 {
@@ -104,7 +117,7 @@ func (b *Builder) dispatch(stepN int, ast *parser.Node) error {
 			return fmt.Errorf("ONBUILD requires at least one argument")
 		}
 		ast = ast.Next.Children[0]
-		strs = append(strs, ast.Value)
+		strList = append(strList, ast.Value)
 		msg += " " + ast.Value
 
 		if len(ast.Flags) > 0 {
@@ -122,9 +135,6 @@ func (b *Builder) dispatch(stepN int, ast *parser.Node) error {
 		cursor = cursor.Next
 		n++
 	}
-	l := len(strs)
-	strList := make([]string, n+l)
-	copy(strList, strs)
 	msgList := make([]string, n)
 
 	var i int
@@ -138,7 +148,7 @@ func (b *Builder) dispatch(stepN int, ast *parser.Node) error {
 	// a subsequent one. So, putting the buildArgs list after the Config.Env
 	// list, in 'envs', is safe.
 	envs := b.runConfig.Env
-	for key, val := range b.BuildArgs {
+	for key, val := range b.options.BuildArgs {
 		if !b.isBuildArgAllowed(key) {
 			// skip build-args that are not in allowed list, meaning they have
 			// not been defined by an "ARG" Dockerfile command yet.
@@ -153,14 +163,26 @@ func (b *Builder) dispatch(stepN int, ast *parser.Node) error {
 		ast = ast.Next
 		var str string
 		str = ast.Value
-		if _, ok := replaceEnvAllowed[cmd]; ok {
+		if replaceEnvAllowed[cmd] {
 			var err error
-			str, err = ProcessWord(ast.Value, envs)
-			if err != nil {
-				return err
+			var words []string
+
+			if allowWordExpansion[cmd] {
+				words, err = ProcessWords(str, envs)
+				if err != nil {
+					return err
+				}
+				strList = append(strList, words...)
+			} else {
+				str, err = ProcessWord(str, envs)
+				if err != nil {
+					return err
+				}
+				strList = append(strList, str)
 			}
+		} else {
+			strList = append(strList, str)
 		}
-		strList[i+l] = str
 		msgList[i] = ast.Value
 		i++
 	}

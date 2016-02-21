@@ -4,7 +4,8 @@ title = "Installation on Mac OS X"
 description = "Instructions for installing Docker on OS X using boot2docker."
 keywords = ["Docker, Docker documentation, requirements, boot2docker, VirtualBox, SSH, Linux, OSX, OS X,  Mac"]
 [menu.main]
-parent = "smn_engine"
+parent = "engine_install"
+weight="-90"
 +++
 <![end-metadata]-->
 
@@ -111,7 +112,7 @@ and choosing "Open" from the pop-up menu.
 
 To run a Docker container, you:
 
-* create a new (or start an existing) Docker virtual machine
+* create a new (or start an existing) virtual machine that runs Docker.
 * switch your environment to your new VM
 * use the `docker` client to create, load, and manage containers
 
@@ -383,10 +384,14 @@ The next exercise demonstrates how to do this.
         $ docker stop mysite
         $ docker rm mysite
 
+> **Note**: There is a [known
+> issue](https://docs.docker.com/machine/drivers/virtualbox/#known-issues) that
+> may cause files shared with your nginx container to not update correctly as you
+> modify them on your host.
 
 ## Upgrade Docker Toolbox
 
-To upgrade Docker Toolbox, download an re-run [the Docker Toolbox
+To upgrade Docker Toolbox, download and re-run [the Docker Toolbox
 installer](https://docker.com/toolbox/).
 
 
@@ -425,6 +430,6 @@ Use `docker-machine help` to list the full command line reference for Docker Mac
 information about using SSH or SCP to access a VM, see [the Docker Machine
 documentation](https://docs.docker.com/machine/).
 
-You can continue with the [Docker User Guide](../userguide). If you are
+You can continue with the [Docker User Guide](../userguide/index.md). If you are
 interested in using the Kitematic GUI, see the [Kitematic user
 guide](https://docs.docker.com/kitematic/userguide/).

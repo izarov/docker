@@ -18,6 +18,8 @@ import (
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/label"
+	"github.com/opencontainers/runc/libcontainer/system"
+	libcontainerUtils "github.com/opencontainers/runc/libcontainer/utils"
 )
 
 const defaultMountFlags = syscall.MS_NOEXEC | syscall.MS_NOSUID | syscall.MS_NODEV
@@ -29,7 +31,7 @@ func setupRootfs(config *configs.Config, console *linuxConsole) (err error) {
 		return newSystemError(err)
 	}
 
-	setupDev := len(config.Devices) == 0
+	setupDev := len(config.Devices) != 0
 	for _, m := range config.Mounts {
 		for _, precmd := range m.PremountCmds {
 			if err := mountCmd(precmd); err != nil {
@@ -46,7 +48,7 @@ func setupRootfs(config *configs.Config, console *linuxConsole) (err error) {
 			}
 		}
 	}
-	if !setupDev {
+	if setupDev {
 		if err := createDevices(config); err != nil {
 			return newSystemError(err)
 		}
@@ -68,7 +70,7 @@ func setupRootfs(config *configs.Config, console *linuxConsole) (err error) {
 	if err != nil {
 		return newSystemError(err)
 	}
-	if !setupDev {
+	if setupDev {
 		if err := reOpenDevNull(); err != nil {
 			return newSystemError(err)
 		}
@@ -290,15 +292,33 @@ func getCgroupMounts(m *configs.Mount) ([]*configs.Mount, error) {
 	return binds, nil
 }
 
-// checkMountDestination checks to ensure that the mount destination is not over the
-// top of /proc or /sys.
+// checkMountDestination checks to ensure that the mount destination is not over the top of /proc.
 // dest is required to be an abs path and have any symlinks resolved before calling this function.
 func checkMountDestination(rootfs, dest string) error {
-	if filepath.Clean(rootfs) == filepath.Clean(dest) {
+	if libcontainerUtils.CleanPath(rootfs) == libcontainerUtils.CleanPath(dest) {
 		return fmt.Errorf("mounting into / is prohibited")
 	}
 	invalidDestinations := []string{
 		"/proc",
+	}
+	// White list, it should be sub directories of invalid destinations
+	validDestinations := []string{
+		// These entries can be bind mounted by files emulated by fuse,
+		// so commands like top, free displays stats in container.
+		"/proc/cpuinfo",
+		"/proc/diskstats",
+		"/proc/meminfo",
+		"/proc/stat",
+		"/proc/net/dev",
+	}
+	for _, valid := range validDestinations {
+		path, err := filepath.Rel(filepath.Join(rootfs, valid), dest)
+		if err != nil {
+			return err
+		}
+		if path == "." {
+			return nil
+		}
 	}
 	for _, invalid := range invalidDestinations {
 		path, err := filepath.Rel(filepath.Join(rootfs, invalid), dest)
@@ -322,7 +342,7 @@ func setupDevSymlinks(rootfs string) error {
 	// kcore support can be toggled with CONFIG_PROC_KCORE; only create a symlink
 	// in /dev if it exists in /proc.
 	if _, err := os.Stat("/proc/kcore"); err == nil {
-		links = append(links, [2]string{"/proc/kcore", "/dev/kcore"})
+		links = append(links, [2]string{"/proc/kcore", "/dev/core"})
 	}
 	for _, link := range links {
 		var (
@@ -366,17 +386,29 @@ func reOpenDevNull() error {
 
 // Create the device nodes in the container.
 func createDevices(config *configs.Config) error {
+	useBindMount := system.RunningInUserNS() || config.Namespaces.Contains(configs.NEWUSER)
 	oldMask := syscall.Umask(0000)
 	for _, node := range config.Devices {
 		// containers running in a user namespace are not allowed to mknod
 		// devices so we can just bind mount it from the host.
-		if err := createDeviceNode(config.Rootfs, node, config.Namespaces.Contains(configs.NEWUSER)); err != nil {
+		if err := createDeviceNode(config.Rootfs, node, useBindMount); err != nil {
 			syscall.Umask(oldMask)
 			return err
 		}
 	}
 	syscall.Umask(oldMask)
 	return nil
+}
+
+func bindMountDeviceNode(dest string, node *configs.Device) error {
+	f, err := os.Create(dest)
+	if err != nil && !os.IsExist(err) {
+		return err
+	}
+	if f != nil {
+		f.Close()
+	}
+	return syscall.Mount(node.Path, dest, "bind", syscall.MS_BIND, "")
 }
 
 // Creates the device node in the rootfs of the container.
@@ -387,18 +419,13 @@ func createDeviceNode(rootfs string, node *configs.Device, bind bool) error {
 	}
 
 	if bind {
-		f, err := os.Create(dest)
-		if err != nil && !os.IsExist(err) {
-			return err
-		}
-		if f != nil {
-			f.Close()
-		}
-		return syscall.Mount(node.Path, dest, "bind", syscall.MS_BIND, "")
+		return bindMountDeviceNode(dest, node)
 	}
 	if err := mknodDevice(dest, node); err != nil {
 		if os.IsExist(err) {
 			return nil
+		} else if os.IsPermission(err) {
+			return bindMountDeviceNode(dest, node)
 		}
 		return err
 	}
@@ -634,7 +661,6 @@ func remount(m *configs.Mount, rootfs string) error {
 	if !strings.HasPrefix(dest, rootfs) {
 		dest = filepath.Join(rootfs, dest)
 	}
-
 	if err := syscall.Mount(m.Source, dest, m.Device, uintptr(m.Flags|syscall.MS_REMOUNT), ""); err != nil {
 		return err
 	}

@@ -1,18 +1,20 @@
 <!-- [metadata]>
 +++
-title = "Using the command line"
+title = "Command line reference"
 description = "Docker's CLI command description and usage"
 keywords = ["Docker, Docker documentation, CLI,  command line"]
 [menu.main]
 identifier= "smn_cli"
-parent = "mn_reference"
+parent = "engine_ref"
+weight=-70
 +++
-<!-- [end-metadata]-->
+<![end-metadata]-->
+
 
 
 # The Docker commands
 
-This section contains reference information on using Docker's command line client. Each command has a reference page along with samples. If you are unfamiliar with the command line, you should start by reading about how to ["Use the Docker command line"](cli.md).  
+This section contains reference information on using Docker's command line client. Each command has a reference page along with samples. If you are unfamiliar with the command line, you should start by reading about how to [Use the Docker command line](cli.md).  
 
 You start the Docker daemon with the command line. How you start the daemon affects your Docker containers. For that reason you should also make sure to read the [`daemon`](daemon.md) reference page.
 
@@ -58,6 +60,7 @@ You start the Docker daemon with the command line. How you start the daemon affe
 * [stop](stop.md)
 * [top](top.md)
 * [unpause](unpause.md)
+* [update](update.md)
 * [wait](wait.md)
 
 ### Hub and registry commands

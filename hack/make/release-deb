@@ -7,12 +7,14 @@ set -e
 # 	deb http://apt.dockerproject.org/repo $distro-$release $version
 #
 # For example:
-#	deb http://apt.dockerproject.org/repo ubuntu-trusy main
-#	deb http://apt.dockerproject.org/repo ubuntu-vivid testing
+#	deb http://apt.dockerproject.org/repo ubuntu-trusty main
+#	deb http://apt.dockerproject.org/repo ubuntu-trusty testing
 #	deb http://apt.dockerproject.org/repo debian-wheezy experimental
 #	deb http://apt.dockerproject.org/repo debian-jessie main
 #
 # ... and so on and so forth for the builds created by hack/make/build-deb
+
+source "$(dirname "$BASH_SOURCE")/.detect-daemon-osarch"
 
 : ${DOCKER_RELEASE_DIR:=$DEST}
 : ${GPG_KEYID:=releasedocker}
@@ -23,7 +25,29 @@ mkdir -p "$APTDIR/conf" "$APTDIR/db"
 
 # supported arches/sections
 arches=( amd64 i386 )
-components=( main testing experimental )
+
+# Preserve existing components but don't add any non-existing ones
+for component in main testing experimental ; do
+	if ls "$APTDIR/dists/*/$component" >/dev/null 2>&1 ; then
+		components+=( $component )
+	fi
+done
+
+# set the component for the version being released
+component="main"
+
+if [[ "$VERSION" == *-rc* ]]; then
+	component="testing"
+fi
+
+if [ "$DOCKER_EXPERIMENTAL" ] || [[ "$VERSION" == *-dev ]] || [ -n "$(git status --porcelain)" ]; then
+	component="experimental"
+fi
+
+# Make sure our component is in the list of components
+if [[ ! "${components[*]}" =~ $component ]] ; then
+	components+=( $component )
+fi
 
 # create/update apt-ftparchive file
 if [ ! -f "$APTDIR/conf/apt-ftparchive.conf" ]; then
@@ -53,7 +77,7 @@ if [ ! -f "$APTDIR/conf/apt-ftparchive.conf" ]; then
 	for suite in $(exec contrib/reprepro/suites.sh); do
 		cat <<-EOF
 		Tree "dists/${suite}" {
-			Sections "main testing experimental";
+			Sections "${components[*]}";
 			Architectures "${arches[*]}";
 		}
 
@@ -70,19 +94,8 @@ if [ ! -f "$APTDIR/conf/docker-engine-release.conf" ]; then
 	EOF
 fi
 
-# set the component for the version being released
-component="main"
-
-if [[ "$VERSION" == *-rc* ]]; then
-	component="testing"
-fi
-
-if [ $DOCKER_EXPERIMENTAL ] || [[ "$VERSION" == *-dev ]] || [ -n "$(git status --porcelain)" ]; then
-	component="experimental"
-fi
-
 # release the debs
-for dir in contrib/builder/deb/*/; do
+for dir in contrib/builder/deb/${PACKAGE_ARCH}/*/; do
 	version="$(basename "$dir")"
 	codename="${version//debootstrap-}"
 
@@ -91,7 +104,7 @@ for dir in contrib/builder/deb/*/; do
 	# if we have a $GPG_PASSPHRASE we may as well
 	# dpkg-sign before copying the deb into the pool
 	if [ ! -z "$GPG_PASSPHRASE" ]; then
-		dpkg-sig -g "--passphrase $GPG_PASSPHRASE" \
+		dpkg-sig -g "--no-tty --passphrase '$GPG_PASSPHRASE'" \
 			-k "$GPG_KEYID" --sign builder "${DEBFILE[@]}"
 	fi
 
@@ -100,17 +113,15 @@ for dir in contrib/builder/deb/*/; do
 	cp "${DEBFILE[@]}" "$APTDIR/pool/$component/d/docker-engine/"
 
 	# update the filelist for this codename/component
+	mkdir -p "$APTDIR/dists/$codename/$component"
 	find "$APTDIR/pool/$component" \
 		-name *~${codename#*-}*.deb > "$APTDIR/dists/$codename/$component/filelist"
 done
 
-# clean the databases
-apt-ftparchive clean "$APTDIR/conf/apt-ftparchive.conf"
-
 # run the apt-ftparchive commands so we can have pinning
 apt-ftparchive generate "$APTDIR/conf/apt-ftparchive.conf"
 
-for dir in contrib/builder/deb/*/; do
+for dir in contrib/builder/deb/${PACKAGE_ARCH}/*/; do
 	version="$(basename "$dir")"
 	codename="${version//debootstrap-}"
 
@@ -122,6 +133,7 @@ for dir in contrib/builder/deb/*/; do
 		"$APTDIR/dists/$codename" > "$APTDIR/dists/$codename/Release"
 
 	for arch in "${arches[@]}"; do
+		mkdir -p "$APTDIR/dists/$codename/$component/binary-$arch"
 		apt-ftparchive \
 			-o "APT::FTPArchive::Release::Codename=$codename" \
 			-o "APT::FTPArchive::Release::Suite=$codename" \

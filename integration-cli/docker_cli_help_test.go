@@ -126,14 +126,14 @@ func (s *DockerSuite) TestHelpTextVerify(c *check.C) {
 			out, stderr, _, err = runCommandWithStdoutStderr(helpCmd)
 			c.Assert(len(stderr), checker.Equals, 0, check.Commentf("Error on %q help. non-empty stderr:%q", cmd, stderr))
 			c.Assert(out, checker.Not(checker.HasSuffix), "\n\n", check.Commentf("Should not have blank line on %q\n", cmd))
-			c.Assert(out, checker.Contains, "--help=false", check.Commentf("Should show full usage on %q\n", cmd))
+			c.Assert(out, checker.Contains, "--help", check.Commentf("All commands should mention '--help'. Command '%v' did not.\n", cmd))
 
 			c.Assert(err, checker.IsNil, check.Commentf(out))
 
 			// Check each line for lots of stuff
 			lines := strings.Split(out, "\n")
 			for _, line := range lines {
-				c.Assert(len(line), checker.LessOrEqualThan, 90, check.Commentf("Help for %q is too long:\n%s", cmd, line))
+				c.Assert(len(line), checker.LessOrEqualThan, 107, check.Commentf("Help for %q is too long:\n%s", cmd, line))
 
 				if scanForHome && strings.Contains(line, `"`+home) {
 					c.Fatalf("Help for %q should use ~ instead of %q on:\n%s",
@@ -226,7 +226,7 @@ func (s *DockerSuite) TestHelpTextVerify(c *check.C) {
 		}
 
 		// Number of commands for standard release and experimental release
-		standard := 40
+		standard := 41
 		experimental := 1
 		expected := standard + experimental
 		if isLocalDaemon {

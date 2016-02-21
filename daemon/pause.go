@@ -1,18 +1,19 @@
 package daemon
 
 import (
+	"github.com/docker/docker/container"
 	derr "github.com/docker/docker/errors"
 )
 
 // ContainerPause pauses a container
 func (daemon *Daemon) ContainerPause(name string) error {
-	container, err := daemon.Get(name)
+	container, err := daemon.GetContainer(name)
 	if err != nil {
 		return err
 	}
 
 	if err := daemon.containerPause(container); err != nil {
-		return derr.ErrorCodePauseError.WithArgs(name, err)
+		return err
 	}
 
 	return nil
@@ -20,7 +21,7 @@ func (daemon *Daemon) ContainerPause(name string) error {
 
 // containerPause pauses the container execution without stopping the process.
 // The execution can be resumed by calling containerUnpause.
-func (daemon *Daemon) containerPause(container *Container) error {
+func (daemon *Daemon) containerPause(container *container.Container) error {
 	container.Lock()
 	defer container.Unlock()
 
@@ -34,8 +35,13 @@ func (daemon *Daemon) containerPause(container *Container) error {
 		return derr.ErrorCodeAlreadyPaused.WithArgs(container.ID)
 	}
 
-	if err := daemon.execDriver.Pause(container.command); err != nil {
-		return err
+	// We cannot Pause the container which is restarting
+	if container.Restarting {
+		return derr.ErrorCodeContainerRestarting.WithArgs(container.ID)
+	}
+
+	if err := daemon.execDriver.Pause(container.Command); err != nil {
+		return derr.ErrorCodeCantPause.WithArgs(container.ID, err)
 	}
 	container.Paused = true
 	daemon.LogContainerEvent(container, "pause")

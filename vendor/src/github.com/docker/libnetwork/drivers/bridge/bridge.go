@@ -15,6 +15,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/datastore"
+	"github.com/docker/libnetwork/discoverapi"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/iptables"
 	"github.com/docker/libnetwork/netlabel"
@@ -41,6 +42,9 @@ const (
 	DefaultGatewayV6AuxKey = "DefaultGatewayIPv6"
 )
 
+type iptableCleanFunc func() error
+type iptablesCleanFuncs []iptableCleanFunc
+
 // configuration info for the "bridge" driver.
 type configuration struct {
 	EnableIPForwarding  bool
@@ -65,6 +69,7 @@ type networkConfiguration struct {
 	DefaultGatewayIPv6 net.IP
 	dbIndex            uint64
 	dbExists           bool
+	Internal           bool
 }
 
 // endpointConfiguration represents the user specified configuration for the sandbox endpoint
@@ -92,22 +97,24 @@ type bridgeEndpoint struct {
 }
 
 type bridgeNetwork struct {
-	id         string
-	bridge     *bridgeInterface // The bridge's L3 interface
-	config     *networkConfiguration
-	endpoints  map[string]*bridgeEndpoint // key: endpoint id
-	portMapper *portmapper.PortMapper
-	driver     *driver // The network's driver
+	id            string
+	bridge        *bridgeInterface // The bridge's L3 interface
+	config        *networkConfiguration
+	endpoints     map[string]*bridgeEndpoint // key: endpoint id
+	portMapper    *portmapper.PortMapper
+	driver        *driver // The network's driver
+	iptCleanFuncs iptablesCleanFuncs
 	sync.Mutex
 }
 
 type driver struct {
-	config      *configuration
-	network     *bridgeNetwork
-	natChain    *iptables.ChainInfo
-	filterChain *iptables.ChainInfo
-	networks    map[string]*bridgeNetwork
-	store       datastore.DataStore
+	config         *configuration
+	network        *bridgeNetwork
+	natChain       *iptables.ChainInfo
+	filterChain    *iptables.ChainInfo
+	isolationChain *iptables.ChainInfo
+	networks       map[string]*bridgeNetwork
+	store          datastore.DataStore
 	sync.Mutex
 }
 
@@ -126,11 +133,11 @@ func Init(dc driverapi.DriverCallback, config map[string]interface{}) error {
 	if out, err := exec.Command("modprobe", "-va", "nf_nat").CombinedOutput(); err != nil {
 		logrus.Warnf("Running modprobe nf_nat failed with message: `%s`, error: %v", strings.TrimSpace(string(out)), err)
 	}
+	if out, err := exec.Command("modprobe", "-va", "xt_conntrack").CombinedOutput(); err != nil {
+		logrus.Warnf("Running modprobe xt_conntrack failed with message: `%s`, error: %v", strings.TrimSpace(string(out)), err)
+	}
 	if err := iptables.FirewalldInit(); err != nil {
 		logrus.Debugf("Fail to initialize firewalld: %v, using raw iptables instead", err)
-	}
-	if err := iptables.RemoveExistingChain(DockerChain, iptables.Nat); err != nil {
-		logrus.Warnf("Failed to remove existing iptables entries in %s : %v", DockerChain, err)
 	}
 
 	d := newDriver()
@@ -236,15 +243,19 @@ func parseErr(label, value, errString string) error {
 	return types.BadRequestErrorf("failed to parse %s value: %v (%s)", label, value, errString)
 }
 
-func (n *bridgeNetwork) getDriverChains() (*iptables.ChainInfo, *iptables.ChainInfo, error) {
+func (n *bridgeNetwork) registerIptCleanFunc(clean iptableCleanFunc) {
+	n.iptCleanFuncs = append(n.iptCleanFuncs, clean)
+}
+
+func (n *bridgeNetwork) getDriverChains() (*iptables.ChainInfo, *iptables.ChainInfo, *iptables.ChainInfo, error) {
 	n.Lock()
 	defer n.Unlock()
 
 	if n.driver == nil {
-		return nil, nil, types.BadRequestErrorf("no driver found")
+		return nil, nil, nil, types.BadRequestErrorf("no driver found")
 	}
 
-	return n.driver.natChain, n.driver.filterChain, nil
+	return n.driver.natChain, n.driver.filterChain, n.driver.isolationChain, nil
 }
 
 func (n *bridgeNetwork) getNetworkBridgeName() string {
@@ -274,26 +285,25 @@ func (n *bridgeNetwork) getEndpoint(eid string) (*bridgeEndpoint, error) {
 // from each of the other networks
 func (n *bridgeNetwork) isolateNetwork(others []*bridgeNetwork, enable bool) error {
 	n.Lock()
-	thisV4 := n.bridge.bridgeIPv4
-	thisV6 := getV6Network(n.config, n.bridge)
+	thisConfig := n.config
 	n.Unlock()
+
+	if thisConfig.Internal {
+		return nil
+	}
 
 	// Install the rules to isolate this networks against each of the other networks
 	for _, o := range others {
 		o.Lock()
-		otherV4 := o.bridge.bridgeIPv4
-		otherV6 := getV6Network(o.config, o.bridge)
+		otherConfig := o.config
 		o.Unlock()
 
-		if !types.CompareIPNet(thisV4, otherV4) {
-			// It's ok to pass a.b.c.d/x, iptables will ignore the host subnet bits
-			if err := setINC(thisV4.String(), otherV4.String(), enable); err != nil {
-				return err
-			}
+		if otherConfig.Internal {
+			continue
 		}
 
-		if thisV6 != nil && otherV6 != nil && !types.CompareIPNet(thisV6, otherV6) {
-			if err := setINC(thisV6.String(), otherV6.String(), enable); err != nil {
+		if thisConfig.BridgeName != otherConfig.BridgeName {
+			if err := setINC(thisConfig.BridgeName, otherConfig.BridgeName, enable); err != nil {
 				return err
 			}
 		}
@@ -339,9 +349,11 @@ func (c *networkConfiguration) conflictsWithNetworks(id string, others []*bridge
 
 func (d *driver) configure(option map[string]interface{}) error {
 	var (
-		config                *configuration
-		err                   error
-		natChain, filterChain *iptables.ChainInfo
+		config         *configuration
+		err            error
+		natChain       *iptables.ChainInfo
+		filterChain    *iptables.ChainInfo
+		isolationChain *iptables.ChainInfo
 	)
 
 	genericData, ok := option[netlabel.GenericData]
@@ -370,15 +382,19 @@ func (d *driver) configure(option map[string]interface{}) error {
 	}
 
 	if config.EnableIPTables {
-		natChain, filterChain, err = setupIPChains(config)
+		removeIPChains()
+		natChain, filterChain, isolationChain, err = setupIPChains(config)
 		if err != nil {
 			return err
 		}
+		// Make sure on firewall reload, first thing being re-played is chains creation
+		iptables.OnReloaded(func() { logrus.Debugf("Recreating iptables chains on firewall reload"); setupIPChains(config) })
 	}
 
 	d.Lock()
 	d.natChain = natChain
 	d.filterChain = filterChain
+	d.isolationChain = isolationChain
 	d.config = config
 	d.Unlock()
 
@@ -450,6 +466,8 @@ func (c *networkConfiguration) processIPAM(id string, ipamV4Data, ipamV6Data []d
 	}
 
 	if len(ipamV6Data) > 0 {
+		c.AddressIPv6 = ipamV6Data[0].Pool
+
 		if ipamV6Data[0].Gateway != nil {
 			c.AddressIPv6 = types.GetIPNetCopy(ipamV6Data[0].Gateway)
 		}
@@ -478,6 +496,12 @@ func parseNetworkOptions(id string, option options.Generic) (*networkConfigurati
 	// Process well-known labels next
 	if val, ok := option[netlabel.EnableIPv6]; ok {
 		config.EnableIPv6 = val.(bool)
+	}
+
+	if val, ok := option[netlabel.Internal]; ok {
+		if internal, ok := val.(bool); ok && internal {
+			config.Internal = true
+		}
 	}
 
 	// Finally validate the configuration
@@ -602,6 +626,10 @@ func (d *driver) createNetwork(config *networkConfiguration) error {
 			}
 			return err
 		}
+		network.registerIptCleanFunc(func() error {
+			nwList := d.getNetworks()
+			return network.isolateNetwork(nwList, false)
+		})
 		return nil
 	}
 
@@ -720,27 +748,19 @@ func (d *driver) DeleteNetwork(nid string) error {
 		return err
 	}
 
-	// In case of failures after this point, restore the network isolation rules
-	nwList := d.getNetworks()
-	defer func() {
-		if err != nil {
-			if err := n.isolateNetwork(nwList, true); err != nil {
-				logrus.Warnf("Failed on restoring the inter-network iptables rules on cleanup: %v", err)
-			}
-		}
-	}()
-
-	// Remove inter-network communication rules.
-	err = n.isolateNetwork(nwList, false)
-	if err != nil {
-		return err
-	}
-
 	// We only delete the bridge when it's not the default bridge. This is keep the backward compatible behavior.
 	if !config.DefaultBridge {
-		err = netlink.LinkDel(n.bridge.Link)
+		if err := netlink.LinkDel(n.bridge.Link); err != nil {
+			logrus.Warnf("Failed to remove bridge interface %s on network %s delete: %v", config.BridgeName, nid, err)
+		}
 	}
 
+	// clean all relevant iptables rules
+	for _, cleanFunc := range n.iptCleanFuncs {
+		if errClean := cleanFunc(); errClean != nil {
+			logrus.Warnf("Failed to clean iptables rules for bridge network: %v", errClean)
+		}
+	}
 	return d.storeDelete(config)
 }
 
@@ -959,13 +979,20 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	if endpoint.addrv6 == nil && config.EnableIPv6 {
 		var ip6 net.IP
 		network := n.bridge.bridgeIPv6
+		if config.AddressIPv6 != nil {
+			network = config.AddressIPv6
+		}
+
 		ones, _ := network.Mask.Size()
-		if ones <= 80 {
-			ip6 = make(net.IP, len(network.IP))
-			copy(ip6, network.IP)
-			for i, h := range endpoint.macAddress {
-				ip6[i+10] = h
-			}
+		if ones > 80 {
+			err = types.ForbiddenErrorf("Cannot self generate an IPv6 address on network %v: At least 48 host bits are needed.", network)
+			return err
+		}
+
+		ip6 = make(net.IP, len(network.IP))
+		copy(ip6, network.IP)
+		for i, h := range endpoint.macAddress {
+			ip6[i+10] = h
 		}
 
 		endpoint.addrv6 = &net.IPNet{IP: ip6, Mask: network.Mask}
@@ -1037,9 +1064,8 @@ func (d *driver) DeleteEndpoint(nid, eid string) error {
 	// Remove port mappings. Do not stop endpoint delete on unmap failure
 	n.releasePorts(ep)
 
-	// Try removal of link. Discard error: link pair might have
-	// already been deleted by sandbox delete. Make sure defer
-	// does not see this error either.
+	// Try removal of link. Discard error: it is a best effort.
+	// Also make sure defer does not see this error either.
 	if link, err := netlink.LinkByName(ep.srcName); err == nil {
 		netlink.LinkDel(link)
 	}
@@ -1263,12 +1289,12 @@ func (d *driver) Type() string {
 }
 
 // DiscoverNew is a notification for a new discovery event, such as a new node joining a cluster
-func (d *driver) DiscoverNew(dType driverapi.DiscoveryType, data interface{}) error {
+func (d *driver) DiscoverNew(dType discoverapi.DiscoveryType, data interface{}) error {
 	return nil
 }
 
 // DiscoverDelete is a notification for a discovery delete event, such as a node leaving a cluster
-func (d *driver) DiscoverDelete(dType driverapi.DiscoveryType, data interface{}) error {
+func (d *driver) DiscoverDelete(dType discoverapi.DiscoveryType, data interface{}) error {
 	return nil
 }
 
