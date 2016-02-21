@@ -1,8 +1,6 @@
 package logger
 
 import (
-	"bufio"
-	"bytes"
 	"io"
 	"sync"
 	"time"
@@ -43,29 +41,25 @@ func (c *Copier) Run() {
 
 func (c *Copier) copySrc(name string, src io.Reader) {
 	defer c.copyJobs.Done()
-	reader := bufio.NewReader(src)
+	buf := make([]byte, 4096)
 
 	for {
 		select {
 		case <-c.closed:
 			return
 		default:
-			line, err := reader.ReadBytes('\n')
-			line = bytes.TrimSuffix(line, []byte{'\n'})
-
-			// ReadBytes can return full or partial output even when it failed.
-			// e.g. it can return a full entry and EOF.
-			if err == nil || len(line) > 0 {
-				if logErr := c.dst.Log(&Message{ContainerID: c.cid, Line: line, Source: name, Timestamp: time.Now().UTC()}); logErr != nil {
-					logrus.Errorf("Failed to log msg %q for logger %s: %s", line, c.dst.Name(), logErr)
+			bytesRead, err := src.Read(buf)
+			if err == nil || bytesRead > 0 {
+				if logErr := c.dst.Log(&Message{ContainerID: c.cid, Line: buf[:bytesRead], Source: name, Timestamp: time.Now().UTC()}); logErr != nil {
+					logrus.Errorf("Failed to log msg %q for logger %s: %s", buf[:bytesRead], c.dst.Name(), logErr)
 				}
-			}
 
-			if err != nil {
-				if err != io.EOF {
-					logrus.Errorf("Error scanning log stream: %s", err)
+				if err != nil {
+					if err != io.EOF {
+						logrus.Errorf("Error scanning log stream: %s", err)
+					}
+					return
 				}
-				return
 			}
 		}
 	}
